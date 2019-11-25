@@ -109,7 +109,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
         ctx.spawn(task);
 
         // Send first & final chunk of data.
-        match tx.unbounded_send(InstallSnapshotChunk{offset: msg.offset, data: msg.data, done: msg.done, cb: chunktx}) {
+        match tx.unbounded_send(InstallSnapshotChunk{offset: msg.offset, data: msg.data, done: msg.done, cb: chunktx, file: msg.file, start: msg.start}) {
             Ok(_) => (),
             Err(_) => {
                 error!("Error streaming snapshot chunks to storage engine. Channel was closed.");
@@ -165,7 +165,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
             });
         ctx.spawn(f);
 
-        match tx.unbounded_send(InstallSnapshotChunk{offset: msg.offset, data: msg.data, done: msg.done, cb: chunktx}) {
+        match tx.unbounded_send(InstallSnapshotChunk{offset: msg.offset, data: msg.data, done: msg.done, cb: chunktx, file: msg.file, start: msg.start}) {
             Ok(_) => (),
             Err(_) => {
                 error!("Error streaming snapshot chunks to storage engine. Channel was closed.");
@@ -190,7 +190,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
     ) -> Box<dyn ActorFuture<Actor=Self, Item=InstallSnapshotResponse, Error=()>> {
         let (chunktx, chunkrx) = oneshot::channel();
         let (snap_index, snap_term) = (msg.last_included_index, msg.last_included_term);
-        match tx.unbounded_send(InstallSnapshotChunk{offset: msg.offset, data: msg.data, done: msg.done, cb: chunktx}) {
+        match tx.unbounded_send(InstallSnapshotChunk{offset: msg.offset, data: msg.data, done: msg.done, cb: chunktx, file: msg.file, start: msg.start}) {
             Ok(_) => (),
             Err(_) => {
                 error!("Error streaming snapshot chunks for storage engine. Channel was closed.");
@@ -227,7 +227,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
         &mut self, _: &mut Context<Self>, msg: InstallSnapshotRequest, tx: mpsc::UnboundedSender<InstallSnapshotChunk>,
     ) -> Box<dyn ActorFuture<Actor=Self, Item=InstallSnapshotResponse, Error=()>> {
         let (chunktx, chunkrx) = oneshot::channel();
-        match tx.unbounded_send(InstallSnapshotChunk{offset: msg.offset, data: msg.data, done: msg.done, cb: chunktx}) {
+        match tx.unbounded_send(InstallSnapshotChunk{offset: msg.offset, data: msg.data, done: msg.done, cb: chunktx, file: msg.file, start: msg.start}) {
             Ok(_) => (),
             Err(_) => {
                 error!("Error streaming snapshot chunks to storage engine. Channel was closed.");

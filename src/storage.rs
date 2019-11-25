@@ -252,6 +252,9 @@ pub struct InstallSnapshotChunk {
     pub done: bool,
     /// A callback channel to indicate when the chunk has been successfully written.
     pub cb: Sender<()>,
+
+    pub file: String,
+    pub start: bool,
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////
