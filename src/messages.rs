@@ -139,7 +139,7 @@ pub struct EntryConfigChange {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EntrySnapshotPointer {
     /// The location of the snapshot file on disk.
-    pub path: String,
+    pub paths: Vec<String>,
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////
@@ -271,6 +271,9 @@ pub struct InstallSnapshotRequest {
     pub data: Vec<u8>,
     /// Will be `true` if this is the last chunk in the snapshot.
     pub done: bool,
+    ///
+    pub file: String,
+    pub start: bool,
 }
 
 impl Message for InstallSnapshotRequest {

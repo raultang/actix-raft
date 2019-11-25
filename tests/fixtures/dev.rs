@@ -1,9 +1,6 @@
 //! Development and testing utilities.
 
-use std::{
-    collections::BTreeMap,
-    time::Duration,
-};
+use std::{collections::BTreeMap, time::Duration, thread};
 
 use actix::prelude::*;
 use actix_raft::{
@@ -81,6 +78,9 @@ impl Handler<AppendEntriesRequest<MemoryStorageData>> for RaftRouter {
     fn handle(&mut self, msg: AppendEntriesRequest<MemoryStorageData>, _: &mut Self::Context) -> Self::Result {
         self.routed.0 += 1;
         let addr = self.routing_table.get(&msg.target).unwrap();
+        if msg.entries.len() > 0 {
+            println!("playload: {:?}", msg.entries.get(0).unwrap().payload);
+        }
         if self.isolated_nodes.contains(&msg.target) || self.isolated_nodes.contains(&msg.leader_id) {
             return Box::new(fut::err(()));
         }
@@ -94,6 +94,7 @@ impl Handler<VoteRequest> for RaftRouter {
     type Result = ResponseActFuture<Self, VoteResponse, ()>;
 
     fn handle(&mut self, msg: VoteRequest, _: &mut Self::Context) -> Self::Result {
+
         self.routed.1 += 1;
         let addr = self.routing_table.get(&msg.target).unwrap();
         if self.isolated_nodes.contains(&msg.target) || self.isolated_nodes.contains(&msg.candidate_id) {

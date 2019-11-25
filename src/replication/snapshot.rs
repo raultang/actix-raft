@@ -65,8 +65,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
     fn send_snapshot(&mut self, _: &mut Context<Self>, snap: RSNeedsSnapshotResponse) -> impl ActorFuture<Actor=Self, Item=(), Error=()> {
         // Look up the snapshot on disk.
         let (snap_index, snap_term) = (snap.index, snap.term);
-        let pathbuf = PathBuf::from(snap.pointer.path);
-        let snap_stream = SnapshotStream::new(self.target, pathbuf, self.config.snapshot_max_chunk_size, self.term, self.id, snap_index, snap_term);
+        let snap_stream = SnapshotStream::new(self.target, snap.pointer.paths, self.config.snapshot_max_chunk_size, self.term, self.id, snap_index, snap_term);
 
         fut::wrap_stream(snap_stream)
             .and_then(|res, _, _| fut::result(res))
@@ -112,7 +111,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
 /// An async stream of the chunks of a given file.
 struct SnapshotStream {
     target: NodeId,
-    file: PathBuf,
+    files: Vec<String>,
     offset: u64,
     bufsize: u64,
     term: u64,
@@ -125,11 +124,11 @@ struct SnapshotStream {
 impl SnapshotStream {
     /// Create a new instance.
     pub fn new(
-        target: NodeId, file: PathBuf, bufsize: u64, term: u64, leader_id: NodeId, last_included_index: u64, last_included_term: u64,
+        target: NodeId, files: Vec<String>, bufsize: u64, term: u64, leader_id: NodeId, last_included_index: u64, last_included_term: u64,
     ) -> mpsc::Receiver<Result<InstallSnapshotRequest, ()>> {
         let (tx, rx) = mpsc::channel(0);
         let inst = Self{
-            target, file, offset: 0, bufsize, term, leader_id,
+            target, files, offset: 0, bufsize, term, leader_id,
             last_included_index, last_included_term,
             chan: tx,
         };
@@ -140,59 +139,72 @@ impl SnapshotStream {
     fn run(mut self) {
         // Open the target snapshot file & get a read on its length.
         let mut chan = self.chan.wait();
-        let file_and_len = File::open(&self.file)
-            .and_then(|file| {
-                file.metadata()
-                    .map(|meta| (file, meta.len()))
-            });
-        let (mut file, filelen) = match file_and_len {
-            Ok(data) => data,
-            Err(err) => {
-                error!("Error opening snapshot file for streaming. {}", err);
-                let _ = chan.send(Err(()));
-                return;
-            }
-        };
 
-        loop {
-            let remaining = filelen - self.offset;
-            let chunksize = if self.bufsize > remaining { remaining } else { self.bufsize };
-            let mut data = vec![0u8; chunksize as usize];
-            if let Err(err) = file.read_exact(&mut data) {
-                error!("Error reading from snapshot file for streaming. {}", err);
-                let _ = chan.send(Err(()));
-                let _ = chan.close();
-                return;
-            }
-
-            // Build a new frame for the bytes read.
-            let mut frame = InstallSnapshotRequest{
-                target: self.target, term: self.term, leader_id: self.leader_id,
-                last_included_index: self.last_included_index,
-                last_included_term: self.last_included_term,
-                offset: self.offset, data, done: false,
+        for file_str in self.files {
+            let file_and_len = File::open(PathBuf::from(file_str.clone()))
+                .and_then(|f| {
+                    f.metadata()
+                        .map(|meta| (f, meta.len()))
+                });
+            let (mut file, filelen) = match file_and_len {
+                Ok(data) => data,
+                Err(err) => {
+                    error!("Error opening snapshot file for streaming. {}", err);
+                    let _ = chan.send(Err(()));
+                    return;
+                }
             };
-            self.offset += chunksize;
 
-            // If this was the last chunk, mark it as so.
-            let mut is_done = false;
-            if self.offset == filelen {
-                frame.done = true;
-                is_done = true;
-            }
-
-            match chan.send(Ok(frame)) {
-                Ok(_) if is_done => {
+            let mut start = true;
+            loop {
+                let remaining = filelen - self.offset;
+                let chunksize = if self.bufsize > remaining { remaining } else { self.bufsize };
+                let mut data = vec![0u8; chunksize as usize];
+                if let Err(err) = file.read_exact(&mut data) {
+                    error!("Error reading from snapshot file for streaming. {}", err);
+                    let _ = chan.send(Err(()));
                     let _ = chan.close();
                     return;
                 }
-                Ok(_) => continue,
-                Err(err) => {
-                    error!("Error encountered while reading snapshot chunks. {}", err);
-                    let _ = chan.close();
-                    return;
+
+                // Build a new frame for the bytes read.
+                let mut frame = InstallSnapshotRequest {
+                    target: self.target,
+                    term: self.term,
+                    leader_id: self.leader_id,
+                    last_included_index: self.last_included_index,
+                    last_included_term: self.last_included_term,
+                    offset: self.offset,
+                    data,
+                    done: false,
+                    file: file_str.clone(),
+                    start
+                };
+                self.offset += chunksize;
+
+                // If this was the last chunk, mark it as so.
+                let mut is_done = false;
+                if self.offset == filelen {
+                    frame.done = true;
+                    is_done = true;
+                }
+
+                start = false;
+
+                match chan.send(Ok(frame)) {
+                    Ok(_) if is_done => {
+                        break;
+                    }
+                    Ok(_) => continue,
+                    Err(err) => {
+                        error!("Error encountered while reading snapshot chunks. {}", err);
+                        let _ = chan.close();
+                        return;
+                    }
                 }
             }
         }
+
+        let _ = chan.close();
     }
 }

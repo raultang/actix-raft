@@ -213,7 +213,7 @@ impl Handler<CreateSnapshot<MemoryStorageError>> for MemoryStorage {
                 let path = filepath.to_string_lossy().to_string();
                 debug!("Finished creating snapshot file at {}", &path);
                 act.log = act.log.split_off(&through);
-                let pointer = EntrySnapshotPointer{path};
+                let pointer = EntrySnapshotPointer{paths: vec![path]};
                 let entry = Entry::new_snapshot_pointer(pointer.clone(), index, term);
                 act.log.insert(through, entry);
 
@@ -393,7 +393,7 @@ impl Handler<SyncInstallSnapshot> for SnapshotActor {
             error!("Prematurely exiting snapshot chunk stream. Never hit final chunk.");
             Err(MemoryStorageError)
         } else {
-            Ok(EntrySnapshotPointer{path: filepath.to_string_lossy().to_string()})
+            Ok(EntrySnapshotPointer{paths: vec!(filepath.to_string_lossy().to_string())})
         }
     }
 }
