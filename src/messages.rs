@@ -238,6 +238,30 @@ pub struct VoteResponse {
     pub is_candidate_unknown: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum ChunkState {
+    /// Mark the chunk stream start, at the same time with new file name
+    Start(String),
+    /// New file name
+    NewFile(String),
+    /// Processing only with chunk
+    Process,
+    /// Mark the chunk stream end, at the same time with new file name
+    EndFile(String),
+    /// Mark the chunk stream end
+    End,
+}
+
+impl ChunkState {
+    pub fn is_end(&self) -> bool {
+        match self.clone() {
+            ChunkState::EndFile(file) => true,
+            ChunkState::End => true,
+            _ => false
+        }
+    }
+}
+
 //////////////////////////////////////////////////////////////////////////////////////////////////
 // InstallSnapshotRequest ////////////////////////////////////////////////////////////////////////
 
@@ -270,10 +294,7 @@ pub struct InstallSnapshotRequest {
     /// The raw Vec<u8> of the snapshot chunk, starting at `offset`.
     pub data: Vec<u8>,
     /// Will be `true` if this is the last chunk in the snapshot.
-    pub done: bool,
-    ///
-    pub file: String,
-    pub start: bool,
+    pub state: ChunkState,
 }
 
 impl Message for InstallSnapshotRequest {

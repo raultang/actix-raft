@@ -1,5 +1,6 @@
 
 use actix::prelude::*;
+use log::trace;
 
 use crate::{
     AppData, AppDataResponse, AppError,
@@ -24,6 +25,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
         if state.buffered_outbound.len() > 0 {
             let entries: Vec<_> = state.buffered_outbound.drain(..).map(|elem| (*elem).clone()).collect();
             let last_index_and_term = entries.last().map(|e| (e.index, e.term));
+//            trace!("Sending replicate event to {}", self.target);
             let payload = AppendEntriesRequest{
                 target: self.target, term: self.term, leader_id: self.id,
                 prev_log_index: self.match_index,

@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use actix::prelude::*;
-use log::{debug};
+use log::{debug,trace};
 use tokio_timer::Delay;
 
 use crate::{
@@ -84,6 +84,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
                     }
                 }
 
+                trace!("Sending lagging event to {}", act.target);
                 let last_log_and_index = entries.last().map(|elem| (elem.index, elem.term));
                 let payload = AppendEntriesRequest{
                     target: act.target, term: act.term, leader_id: act.id,

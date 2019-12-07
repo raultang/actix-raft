@@ -17,6 +17,7 @@ actix = "0.8"
 bytes = "0.4"
 futures = "0.1"
 log = "0.4"
+log4rs = "0.8.3"
 rand = "0.6"
 serde = { version="1", features=["derive"] }
 tokio-timer = "0.2"

@@ -30,6 +30,7 @@ use actix_raft::{
         SaveHardState,
     },
 };
+use actix_raft::storage::{NeedSnapshot, FinishSnapshot};
 
 type Entry = RaftEntry<MemoryStorageData>;
 
@@ -72,7 +73,7 @@ impl AppError for MemoryStorageError {}
 pub struct MemoryStorage {
     hs: HardState,
     log: BTreeMap<u64, Entry>,
-    snapshot_data: Option<CurrentSnapshotData>,
+     snapshot_data: Option<CurrentSnapshotData>,
     snapshot_dir: String,
     state_machine: BTreeMap<u64, Entry>,
     snapshot_actor: Addr<SnapshotActor>,
@@ -268,6 +269,22 @@ impl Handler<GetCurrentSnapshot<MemoryStorageError>> for MemoryStorage {
     fn handle(&mut self, _: GetCurrentSnapshot<MemoryStorageError>, _: &mut Self::Context) -> Self::Result {
         debug!("Checking for current snapshot.");
         Box::new(fut::ok(self.snapshot_data.clone()))
+    }
+}
+
+impl Handler<NeedSnapshot<MemoryStorageError>> for MemoryStorage {
+    type Result = ResponseActFuture<Self, (), MemoryStorageError>;
+
+    fn handle(&mut self, _: NeedSnapshot<MemoryStorageError>, _: &mut Self::Context) -> Self::Result {
+        Box::new(fut::err(MemoryStorageError))
+    }
+}
+
+impl Handler<FinishSnapshot<MemoryStorageError>> for MemoryStorage {
+    type Result = ResponseActFuture<Self, (), MemoryStorageError>;
+
+    fn handle(&mut self, _: FinishSnapshot<MemoryStorageError>, _: &mut Self::Context) -> Self::Result {
+        Box::new(fut::err(MemoryStorageError))
     }
 }
 

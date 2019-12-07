@@ -1,7 +1,7 @@
 use std::{io::Read, fs::File, path::PathBuf, time::{Duration, Instant}};
 
 use actix::prelude::*;
-use log::{error};
+use log::{debug, error};
 use futures::{
     sink::{Sink},
     sync::{mpsc},
@@ -19,6 +19,7 @@ use crate::{
     },
     storage::{RaftStorage},
 };
+use crate::messages::ChunkState;
 
 impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStorage<D, R, E>> ReplicationStream<D, R, E, N, S> {
 
@@ -81,13 +82,14 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
             })
 
             // Snapshot pass has finished, handle success or error conditions.
-            .finish().then(move |res, act, _| match res {
+            .finish().then(move |res, act: &mut Self, _| match res {
                 // Snapshot installation was successful. Update target to track last index of snapshot.
                 Ok(_) => {
                     act.next_index = snap_index + 1;
                     act.match_index = snap_index;
                     act.match_term = snap_term;
-                    act.raftnode.do_send(RSUpdateMatchIndex{target: act.target, match_index: snap_index});
+                    act.raftnode.do_send(RSUpdateMatchIndex{target: act.target, match_index: snap_index, snapshot: true});
+
                     fut::Either::A(fut::ok(()))
                 }
                 // If an error was encountered for any reason, delay sending the next snapshot for a few seconds.
@@ -139,9 +141,10 @@ impl SnapshotStream {
     fn run(mut self) {
         // Open the target snapshot file & get a read on its length.
         let mut chan = self.chan.wait();
-
-        for file_str in self.files {
-            let file_and_len = File::open(PathBuf::from(file_str.clone()))
+        let len = self.files.len();
+        for (i, file_str) in self.files.iter().enumerate() {
+            debug!("Opening snapshot file for streaming {}", file_str);
+            let file_and_len = File::open(PathBuf::from(file_str))
                 .and_then(|f| {
                     f.metadata()
                         .map(|meta| (f, meta.len()))
@@ -167,6 +170,16 @@ impl SnapshotStream {
                     return;
                 }
 
+                let mut snapstate;
+
+                if i == 0 && start {
+                    snapstate = ChunkState::Start(file_str.into());
+                } else if start {
+                    snapstate = ChunkState::NewFile(file_str.into());
+                } else {
+                    snapstate = ChunkState::Process;
+                }
+
                 // Build a new frame for the bytes read.
                 let mut frame = InstallSnapshotRequest {
                     target: self.target,
@@ -176,17 +189,23 @@ impl SnapshotStream {
                     last_included_term: self.last_included_term,
                     offset: self.offset,
                     data,
-                    done: false,
-                    file: file_str.clone(),
-                    start
+                    state: snapstate,
                 };
                 self.offset += chunksize;
 
                 // If this was the last chunk, mark it as so.
+                // Note: Did not handle the Start chunk is the end Chunk
                 let mut is_done = false;
                 if self.offset == filelen {
-                    frame.done = true;
+                    if i == len -1 {
+                        match frame.state.clone() {
+                            ChunkState::NewFile(sf) => frame.state = ChunkState::EndFile(sf),
+                            ChunkState::Start(sf) => error!("Got unsupportted state."),
+                            _ => frame.state = ChunkState::End
+                        }
+                    }
                     is_done = true;
+                    self.offset = 0;
                 }
 
                 start = false;

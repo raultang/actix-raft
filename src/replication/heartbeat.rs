@@ -1,4 +1,5 @@
 use actix::prelude::*;
+use log::trace;
 
 use crate::{
     AppData, AppDataResponse, AppError,
@@ -44,6 +45,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
     /// Send a heartbeat frame to the target node.
     pub(super) fn heartbeat_send(&mut self, _: &mut Context<Self>) -> impl ActorFuture<Actor=Self, Item=(), Error=()> {
         // Build the heartbeat frame to be sent to the follower.
+        // trace!("Sending heartbeat to {}", self.target);
         let payload = AppendEntriesRequest{
             target: self.target, term: self.term, leader_id: self.id,
             prev_log_index: self.match_index, prev_log_term: self.match_term,

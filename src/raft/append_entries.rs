@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use actix::prelude::*;
+use log::trace;
 
 use crate::{
     AppData, AppDataResponse, AppError,
@@ -61,6 +62,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
     fn handle(&mut self, msg: AppendEntriesRequest<D>, ctx: &mut Self::Context) -> Self::Result {
         // Only handle requests if actor has finished initialization.
         if let &RaftState::Initializing = &self.state {
+            trace!("Got AppendEntriesRequest, but node is in initial state");
             return Box::new(fut::err(()));
         }
 
@@ -207,7 +209,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
         &mut self, _: &mut Context<Self>, index: u64, term: u64,
     ) -> impl ActorFuture<Actor=Self, Item=Option<ConflictOpt>, Error=()> {
         let storage = self.storage.clone();
-        fut::wrap_future(self.storage.send::<GetLogEntries<D, E>>(GetLogEntries::new(index, index)))
+        fut::wrap_future(self.storage.send::<GetLogEntries<D, E>>(GetLogEntries::new(index, index+1)))
             .map_err(|err, act: &mut Self, ctx| act.map_fatal_actix_messaging_error(ctx, err, DependencyAddr::RaftStorage))
             .and_then(|res, act, ctx| act.map_fatal_storage_result(ctx, res))
             .and_then(move |res, act, _| {

@@ -30,7 +30,9 @@ use fixtures::{
 /// `RUST_LOG=actix_raft,clustering=debug cargo test clustering`
 #[test]
 fn clustering() {
-    setup_logger();
+//    setup_logger();
+
+    log4rs::init_file("resources/log4rs.yml", Default::default()).unwrap();
     let sys = System::builder().stop_on_panic(true).name("test").build();
 
     // Setup test dependencies.

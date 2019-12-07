@@ -1,5 +1,5 @@
 use actix::prelude::*;
-
+use log::trace;
 use crate::{
     AppData, AppDataResponse, AppError, NodeId,
     common::{DependencyAddr, UpdateCurrentLeader},
@@ -34,11 +34,13 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
     fn handle_vote_request(&mut self, ctx: &mut Context<Self>, msg: VoteRequest) -> Result<VoteResponse, ()> {
         // Don't interact with non-cluster members.
         if !self.membership.contains(&msg.candidate_id) {
+            trace!("Membership not contains candidate: {}", &msg.candidate_id);
             return Ok(VoteResponse{term: self.current_term, vote_granted: false, is_candidate_unknown: true});
         }
 
         // If candidate's current term is less than this nodes current term, reject.
         if &msg.term < &self.current_term {
+            trace!("Message term {} less than current term {}", &msg.term, &self.current_term);
             return Ok(VoteResponse{term: self.current_term, vote_granted: false, is_candidate_unknown: false});
         }
 
@@ -53,6 +55,8 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
         // If candidate's log is not at least as up-to-date as this node, then reject.
         let client_is_uptodate = (&msg.last_log_term >= &self.last_log_term) && (&msg.last_log_index >= &self.last_log_index);
         if !client_is_uptodate {
+            trace!("Message term {} or index {} less than current log term {} or index {}", &msg.last_log_term, &msg.last_log_index, &self.last_log_term, &self.last_log_index);
+            self.become_candidate(ctx);
             return Ok(VoteResponse{term: self.current_term, vote_granted: false, is_candidate_unknown: false});
         }
 
@@ -60,12 +64,17 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
         match &self.voted_for {
             // This node has already voted for the candidate.
             Some(candidate_id) if candidate_id == &msg.candidate_id => {
+                trace!("Node already voted for the candidate {}", candidate_id);
                 Ok(VoteResponse{term: self.current_term, vote_granted: true, is_candidate_unknown: false})
             }
             // This node has already voted for a different candidate.
-            Some(_) => Ok(VoteResponse{term: self.current_term, vote_granted: false, is_candidate_unknown: false}),
+            Some(candidate_id) => {
+                trace!("Node got vote candidate {}, but already voted for different candidate {}", &msg.candidate_id, candidate_id);
+                Ok(VoteResponse{term: self.current_term, vote_granted: false, is_candidate_unknown: false})
+            },
             // This node has not already voted, so vote for the candidate.
             None => {
+                trace!("Node voting for the candidate {}", &msg.candidate_id);
                 self.voted_for = Some(msg.candidate_id);
                 self.save_hard_state(ctx);
                 self.update_election_timeout_stamp();

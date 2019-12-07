@@ -15,6 +15,7 @@ use crate::{
     },
     storage::{CreateSnapshot, GetCurrentSnapshot, CurrentSnapshotData, RaftStorage},
 };
+use crate::storage::{NeedSnapshot, FinishSnapshot};
 
 //////////////////////////////////////////////////////////////////////////////////////////////////
 // RSFatalActixMessagingError ////////////////////////////////////////////////////////////////////
@@ -99,7 +100,9 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
         };
 
         // Check for existence of current snapshot.
-        Box::new(fut::wrap_future(self.storage.send(GetCurrentSnapshot::new()))
+        Box::new(fut::wrap_future(self.storage
+            .send::<NeedSnapshot<E>>(NeedSnapshot::new()))
+            .and_then(|_, act: &mut Self, _| fut::wrap_future(act.storage.send::<GetCurrentSnapshot<E>>(GetCurrentSnapshot::new())))
             .map_err(|err, act: &mut Self, ctx| act.map_fatal_actix_messaging_error(ctx, err, DependencyAddr::RaftStorage))
             .and_then(|res, act, ctx| act.map_fatal_storage_result(ctx, res))
             .and_then(move |res, act, _| {
@@ -132,12 +135,12 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
 
     /// Handle events from replication streams for when this node needs to revert to follower state.
     fn handle(&mut self, msg: RSRevertToFollower, ctx: &mut Self::Context) {
-        if &msg.term > &self.current_term {
+//        if &msg.term > &self.current_term {
             self.update_current_term(msg.term, None);
             self.save_hard_state(ctx);
             self.update_current_leader(ctx, UpdateCurrentLeader::Unknown);
             self.become_follower(ctx);
-        }
+//        }
     }
 }
 
@@ -149,6 +152,9 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
 
     /// Handle events from a replication stream which updates the target node's match index.
     fn handle(&mut self, msg: RSUpdateMatchIndex, _: &mut Self::Context) {
+        if msg.snapshot {
+            self.storage.do_send(FinishSnapshot::new());
+        }
         // Extract leader state, else do nothing.
         let state = match &mut self.state {
             RaftState::Leader(state) => state,

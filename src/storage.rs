@@ -13,6 +13,7 @@ use crate::{
     AppData, AppDataResponse, AppError, NodeId,
     messages,
 };
+use crate::messages::ChunkState;
 
 //////////////////////////////////////////////////////////////////////////////
 // GetInitialState ///////////////////////////////////////////////////////////
@@ -249,12 +250,9 @@ pub struct InstallSnapshotChunk {
     /// The raw bytes of the snapshot chunk, starting at `offset`.
     pub data: Vec<u8>,
     /// Will be `true` if this is the last chunk in the snapshot.
-    pub done: bool,
+    pub state: ChunkState,
     /// A callback channel to indicate when the chunk has been successfully written.
     pub cb: Sender<()>,
-
-    pub file: String,
-    pub start: bool,
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////
@@ -330,6 +328,37 @@ pub struct HardState {
     pub membership: messages::MembershipConfig,
 }
 
+/// An event to notify persist state machine starting to replicate snapshot to follower
+/// during the time state machine can not commit
+pub struct NeedSnapshot<E: AppError> {
+    marker: std::marker::PhantomData<E>,
+}
+
+impl<E: AppError> NeedSnapshot<E> {
+    pub fn new() -> Self {
+        Self{marker: std::marker::PhantomData}
+    }
+}
+
+impl<E: AppError> Message for NeedSnapshot<E> {
+    type Result = Result<(), E>;
+}
+
+/// An event to notify persist state machine replicate snapshot to follower finished
+pub struct FinishSnapshot<E: AppError> {
+    marker: std::marker::PhantomData<E>,
+}
+
+impl<E: AppError> FinishSnapshot<E> {
+    pub fn new() -> Self {
+        Self{marker: std::marker::PhantomData}
+    }
+}
+
+impl<E: AppError> Message for FinishSnapshot<E> {
+    type Result = Result<(), E>;
+}
+
 //////////////////////////////////////////////////////////////////////////////////////////////////
 // RaftStorage ///////////////////////////////////////////////////////////////////////////////////
 
@@ -354,7 +383,9 @@ pub trait RaftStorage<D, R, E>: 'static
         Handler<ReplicateToStateMachine<D, E>> +
         Handler<CreateSnapshot<E>> +
         Handler<InstallSnapshot<E>> +
-        Handler<GetCurrentSnapshot<E>>;
+        Handler<GetCurrentSnapshot<E>> +
+        Handler<NeedSnapshot<E>> +
+        Handler<FinishSnapshot<E>>;
 
     /// The type to use as the storage actor's context. Should be `Context<Self>` or `SyncContext<Self>`.
     type Context: ActorContext +
@@ -367,5 +398,7 @@ pub trait RaftStorage<D, R, E>: 'static
         ToEnvelope<Self::Actor, ReplicateToStateMachine<D, E>> +
         ToEnvelope<Self::Actor, CreateSnapshot<E>> +
         ToEnvelope<Self::Actor, InstallSnapshot<E>> +
-        ToEnvelope<Self::Actor, GetCurrentSnapshot<E>>;
+        ToEnvelope<Self::Actor, GetCurrentSnapshot<E>> +
+        ToEnvelope<Self::Actor, NeedSnapshot<E>> +
+        ToEnvelope<Self::Actor, FinishSnapshot<E>>;
 }

@@ -244,7 +244,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
                 self.next_index = index + 1; // This should always be the next expected index.
                 self.match_index = index;
                 self.match_term = term;
-                self.raftnode.do_send(RSUpdateMatchIndex{target: self.target, match_index: index});
+                self.raftnode.do_send(RSUpdateMatchIndex{target: self.target, match_index: index, snapshot: false});
             }
 
             // If running at line rate, and our buffered outbound requests have accumulated too
@@ -561,4 +561,6 @@ pub(crate) struct RSUpdateMatchIndex {
     pub target: NodeId,
     /// The index of the most recent log known to have been successfully replicated on the target.
     pub match_index: u64,
+    /// Is the request comming from snapshot finish.
+    pub snapshot: bool,
 }
