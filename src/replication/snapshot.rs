@@ -142,8 +142,9 @@ impl SnapshotStream {
         // Open the target snapshot file & get a read on its length.
         let mut chan = self.chan.wait();
         let len = self.files.len();
+        debug!("Start snapshot streaming for {} files", len);
         for (i, file_str) in self.files.iter().enumerate() {
-            debug!("Opening snapshot file for streaming {}", file_str);
+//            trace!("Opening snapshot file for streaming {}", file_str);
             let file_and_len = File::open(PathBuf::from(file_str))
                 .and_then(|f| {
                     f.metadata()
@@ -199,8 +200,8 @@ impl SnapshotStream {
                 if self.offset == filelen {
                     if i == len -1 {
                         match frame.state.clone() {
-                            ChunkState::NewFile(sf) => frame.state = ChunkState::EndFile(sf),
-                            ChunkState::Start(sf) => error!("Got unsupportted state."),
+                            ChunkState::NewFile(s) => frame.state = ChunkState::EndFile(s),
+                            ChunkState::Start(_s) => error!("Got unsupportted state."),
                             _ => frame.state = ChunkState::End
                         }
                     }
@@ -225,5 +226,6 @@ impl SnapshotStream {
         }
 
         let _ = chan.close();
+        debug!("Snapshot streaming finished for {} files", len);
     }
 }

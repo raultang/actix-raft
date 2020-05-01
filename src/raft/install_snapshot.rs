@@ -159,7 +159,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
             .map_err(|err, act: &mut Self, ctx| act.map_fatal_actix_messaging_error(ctx, err, DependencyAddr::RaftStorage))
             .and_then(|res, act, ctx| act.map_fatal_storage_result(ctx, res))
             .map(move |_, _, _| {
-                debug!("Received final response from storage engine for snapshot stream.");
+//                debug!("Received final response from storage engine for snapshot stream.");
                 // This will be called after all snapshot chunks have been streamed in and
                 // we've received the final response from the storage engine.
                 let _ = finaltx.send(());

@@ -94,7 +94,7 @@ pub struct Config {
     /// Defaults to 5 seconds.
     pub metrics_rate: Duration,
     /// The directory where the log snapshots are to be kept for a Raft node.
-    pub snapshot_dir: String,
+//    pub snapshot_dir: String,
     /// The snapshot policy to use for a Raft node.
     pub snapshot_policy: SnapshotPolicy,
     /// The maximum snapshot chunk size allowed when transmitting snapshots (in bytes).
@@ -108,14 +108,14 @@ impl Config {
     ///
     /// The directory where the log snapshots are to be kept for a Raft node is required and must
     /// be specified to start the config builder process.
-    pub fn build(snapshot_dir: String) -> ConfigBuilder {
+    pub fn build() -> ConfigBuilder {
         ConfigBuilder{
             election_timeout_min: None,
             election_timeout_max: None,
             heartbeat_interval: None,
             max_payload_entries: None,
             metrics_rate: None,
-            snapshot_dir,
+//            snapshot_dir,
             snapshot_policy: None,
             snapshot_max_chunk_size: None,
         }
@@ -139,7 +139,7 @@ pub struct ConfigBuilder {
     /// The rate at which metrics will be pumped out from the Raft node.
     pub metrics_rate: Option<Duration>,
     /// The directory where the log snapshots are to be kept for a Raft node.
-    snapshot_dir: String,
+//    snapshot_dir: String,
     /// The snapshot policy.
     pub snapshot_policy: Option<SnapshotPolicy>,
     /// The maximum snapshot chunk size.
@@ -192,10 +192,10 @@ impl ConfigBuilder {
     /// Validate the state of this builder and produce a new `Config` instance if valid.
     pub fn validate(self) -> Result<Config, ConfigError> {
         // Validate that `snapshot_dir` is a real location on disk, or attempt to create it.
-        fs::create_dir_all(&self.snapshot_dir).map_err(|err| {
+        /*fs::create_dir_all(&self.snapshot_dir).map_err(|err| {
             error!("Error while checking configured value for `snapshot_dir`. {}", err);
             ConfigError::InvalidSnapshotDir
-        })?;
+        })?;*/
 
         // Roll a random election time out based on the configured min & max or their respective defaults.
         let election_min = self.election_timeout_min.unwrap_or(DEFAULT_ELECTION_TIMEOUT_MIN);
@@ -219,7 +219,7 @@ impl ConfigBuilder {
             heartbeat_interval,
             max_payload_entries,
             metrics_rate,
-            snapshot_dir: self.snapshot_dir, snapshot_policy, snapshot_max_chunk_size,
+            /*snapshot_dir: self.snapshot_dir, */snapshot_policy, snapshot_max_chunk_size,
         })
     }
 }

@@ -8,6 +8,7 @@ use actix::{
 };
 use futures::sync::{mpsc::UnboundedReceiver, oneshot::Sender};
 use serde::{Serialize, Deserialize};
+use std::fmt::Debug;
 
 use crate::{
     AppData, AppDataResponse, AppError, NodeId,
@@ -366,7 +367,7 @@ impl<E: AppError> Message for FinishSnapshot<E> {
 ///
 /// See the [storage chapter of the guide](https://railgun-rs.github.io/actix-raft/storage.html#InstallSnapshot)
 /// for details and discussion on this trait and how to implement it.
-pub trait RaftStorage<D, R, E>: 'static
+pub trait RaftStorage<D, R, E>: Send + Sync + 'static
     where
         D: AppData,
         R: AppDataResponse,
