@@ -1,6 +1,12 @@
 changelog
 =========
+
+### [unreleased]
+
 ### 0.4
+#### 0.4.4
+- Implemented `Error` for `config::ConfigError`
+
 #### 0.4.3
 Added a few convenience derivations.
 
