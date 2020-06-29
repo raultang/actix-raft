@@ -253,17 +253,17 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
             // replicate data fast enough.
             if let RSState::LineRate(inner) = &self.state {
                 if inner.buffered_outbound.len() > (self.config.max_payload_entries as usize) {
-                    return Box::new(self.transition_to_lagging(ctx));
+                    return Box::pin(self.transition_to_lagging(ctx));
                 }
             }
 
             // Else, this was just a heartbeat. Do nothing.
-            return Box::new(fut::ok(()));
+            return Box::pin(fut::ok(()));
         }
 
         // Replication was not successful, if a newer term has been returned, revert to follower.
         if &res.term > &self.term {
-            return Box::new(
+            return Box::pin(
                 fut::wrap_future(self.raftnode.send(RSRevertToFollower{target: self.target, term: res.term}))
                     .map_err(|err, act: &mut Self, ctx| act.map_fatal_actix_messaging_error(ctx, err, DependencyAddr::RaftInternal))
                     // This condition represents a replication failure, so return an error condition.
@@ -278,7 +278,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
             // If the returned conflict opt index is greater than line index, then this is a
             // logical error, and no action should be taken. This represents a replication failure.
             if &conflict.index > &self.line_index {
-                return Box::new(fut::err(()));
+                return Box::pin(fut::err(()));
             }
 
             // Check snapshot policy and handle conflict as needed.
@@ -287,7 +287,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
                     self.next_index = conflict.index + 1;
                     self.match_index = conflict.index;
                     self.match_term = conflict.term;
-                    return Box::new(self.transition_to_lagging(ctx));
+                    return Box::pin(self.transition_to_lagging(ctx));
                 }
                 SnapshotPolicy::LogsSinceLast(threshold) => {
                     let diff = &self.line_index - &conflict.index; // NOTE WELL: underflow is guarded against above.
@@ -298,15 +298,15 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
 
                     if needs_snpshot {
                         // Follower is far behind and needs to receive an InstallSnapshot RPC.
-                        return Box::new(self.transition_to_snapshotting(ctx));
+                        return Box::pin(self.transition_to_snapshotting(ctx));
                     }
                     // Follower is behind, but not too far behind to receive an InstallSnapshot RPC.
-                    return Box::new(self.transition_to_lagging(ctx));
+                    return Box::pin(self.transition_to_lagging(ctx));
                 }
             }
         } else {
             self.next_index = if self.next_index > 0 { self.next_index - 1} else { 0 }; // Guard against underflow.
-            return Box::new(self.transition_to_lagging(ctx));
+            return Box::pin(self.transition_to_lagging(ctx));
         }
     }
 

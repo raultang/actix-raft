@@ -62,12 +62,12 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
     fn handle(&mut self, msg: AppendEntriesRequest<D>, ctx: &mut Self::Context) -> Self::Result {
         // Only handle requests if actor has finished initialization.
         if let &RaftState::Initializing = &self.state {
-            return Box::new(fut::err(()));
+            return Box::pin(fut::err(()));
         }
 
         // If message's term is less than most recent term, then we do not honor the request.
         if &msg.term < &self.current_term {
-            return Box::new(fut::ok(AppendEntriesResponse{term: self.current_term, success: false, conflict_opt: None}));
+            return Box::pin(fut::ok(AppendEntriesResponse{term: self.current_term, success: false, conflict_opt: None}));
         }
 
         // Update election timeout.
@@ -105,7 +105,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
 
         // If this is just a heartbeat, then respond.
         if msg.entries.len() == 0 {
-            return Box::new(fut::ok(AppendEntriesResponse{term: self.current_term, success: true, conflict_opt: None}));
+            return Box::pin(fut::ok(AppendEntriesResponse{term: self.current_term, success: true, conflict_opt: None}));
         }
 
         // If RPC's `prev_log_index` is 0, or the RPC's previous log info matches the local
@@ -113,7 +113,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
         let (term, msg_prev_index, msg_prev_term) = (self.current_term, msg.prev_log_index, msg.prev_log_term);
         let has_prev_log_match = &msg.prev_log_index == &u64::min_value() || (&msg_prev_index == &self.last_log_index && &msg_prev_term == &self.last_log_term);
         if has_prev_log_match {
-            return Box::new(self.append_log_entries(ctx, Arc::new(msg.entries))
+            return Box::pin(self.append_log_entries(ctx, Arc::new(msg.entries))
                 .map_ok(move |_, _, _| {
                     AppendEntriesResponse{term, success: true, conflict_opt: None}
                 }));
@@ -121,7 +121,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
 
         // Previous log info doesn't immediately line up, so perform log consistency check and
         // proceed based on its result.
-        Box::new(self.log_consistency_check(ctx, msg_prev_index, msg_prev_term)
+        Box::pin(self.log_consistency_check(ctx, msg_prev_index, msg_prev_term)
             .and_then(move |res, act, ctx| match res {
                 Some(conflict_opt) => {
                     fut::Either::Left(fut::ok(

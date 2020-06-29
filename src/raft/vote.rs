@@ -23,10 +23,10 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
     fn handle(&mut self, msg: VoteRequest, ctx: &mut Self::Context) -> Self::Result {
         // Only handle requests if actor has finished initialization.
         if let &RaftState::Initializing = &self.state {
-            return Box::new(fut::err(()));
+            return Box::pin(fut::err(()));
         }
 
-        Box::new(fut::result(self.handle_vote_request(ctx, msg)))
+        Box::pin(fut::result(self.handle_vote_request(ctx, msg)))
     }
 }
 

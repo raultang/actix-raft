@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::pin::Pin;
 
 use actix::prelude::*;
 use futures::channel::oneshot;
@@ -20,7 +21,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
     ///
     /// **NOTE WELL:** these operations are strictly pipelined to ensure that these operations
     /// happen in strict order for guaranteed linearizability.
-    pub(super) fn process_apply_logs_task(&mut self, ctx: &mut Context<Self>, msg: ApplyLogsTask<D, R, E>) -> Box<dyn ActorFuture<Actor=Self, Output=()>> {
+    pub(super) fn process_apply_logs_task(&mut self, ctx: &mut Context<Self>, msg: ApplyLogsTask<D, R, E>) -> Pin<Box<dyn ActorFuture<Actor=Self, Output=()>>> {
         match msg {
             ApplyLogsTask::Entry{entry, chan} => self.process_apply_logs_task_with_entries(ctx, entry, chan),
             ApplyLogsTask::Outstanding => self.process_apply_logs_task_outstanding(ctx),
@@ -30,7 +31,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
     /// Apply the given payload of log entries to the state machine.
     fn process_apply_logs_task_with_entries(
         &mut self, _: &mut Context<Self>, entry: Arc<Entry<D>>, chan: Option<oneshot::Sender<Result<ClientPayloadResponse<R>, ClientError<D, R, E>>>>,
-    ) -> Box<dyn ActorFuture<Actor=Self, Output=()>> {
+    ) -> Pin<Box<dyn ActorFuture<Actor=Self, Output=()>>> {
         // PREVIOUS TERM UNCOMMITTED LOGS CHECK:
         // Here we are checking to see if there are any logs from the previous term which were
         // outstanding, but which are now safe to apply due to being covered by a new definitive
@@ -67,7 +68,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
         // Resume with the normal flow of logic. Here we are simply taking the payload of entries
         // to be applied to the state machine, applying and then responding as needed.
         let line_index = entry.index;
-        Box::new(f.and_then(move |_, act, _| {
+        Box::pin(f.and_then(move |_, act, _| {
             fut::wrap_future(act.storage.send::<ApplyEntryToStateMachine<D, R, E>>(ApplyEntryToStateMachine::new(entry)))
                 .map_err(|err, act: &mut Self, ctx| {
                     act.map_fatal_actix_messaging_error(ctx, err, DependencyAddr::RaftStorage);
@@ -96,16 +97,16 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
 
     /// Check for any outstanding logs which have been committed but which have not been applied,
     /// then apply them.
-    fn process_apply_logs_task_outstanding(&mut self, _: &mut Context<Self>) -> Box<dyn ActorFuture<Actor=Self, Output=()>> {
+    fn process_apply_logs_task_outstanding(&mut self, _: &mut Context<Self>) -> Pin<Box<dyn ActorFuture<Actor=Self, Output=()>>> {
         // Guard against no-op.
         if &self.last_applied == &self.commit_index {
-            return Box::new(ready(()).into_actor(self));
+            return Box::pin(ready(()).into_actor(self));
         }
 
         // Fetch the series of entries which must be applied to the state machine.
         let start = self.last_applied + 1;
         let stop = self.commit_index + 1;
-        Box::new(fut::wrap_future(self.storage.send::<GetLogEntries<D, E>>(GetLogEntries::new(start, stop)))
+        Box::pin(fut::wrap_future(self.storage.send::<GetLogEntries<D, E>>(GetLogEntries::new(start, stop)))
             .map_err(|err, act: &mut Self, ctx| act.map_fatal_actix_messaging_error(ctx, err, DependencyAddr::RaftStorage))
             .and_then(|res, act, ctx| act.map_fatal_storage_result(ctx, res))
 

@@ -1,3 +1,4 @@
+use std::pin::Pin;
 use actix::prelude::*;
 use log::{error};
 use futures::channel::oneshot;
@@ -13,6 +14,7 @@ use crate::{
     storage::{AppendEntryToLog, RaftStorage},
     try_fut::TryActorFutureExt,
 };
+
 
 impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStorage<D, R, E>> Handler<ClientPayload<D, R, E>> for Raft<D, R, E, N, S> {
     type Result = ResponseActFuture<Self, Result<ClientPayloadResponse<R>, ClientError<D, R, E>>>;
@@ -31,12 +33,12 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
                 rx
             },
             _ => {
-                return Box::new(fut::err(ClientError::ForwardToLeader{payload: msg, leader: self.current_leader}));
+                return Box::pin(fut::err(ClientError::ForwardToLeader{payload: msg, leader: self.current_leader}));
             },
         };
 
         // Build a response from the message's channel.
-        Box::new(fut::wrap_future(response_chan)
+        Box::pin(fut::wrap_future(response_chan)
             .map_err(|e, _: &mut Self, _| {
                 error!("{} {:?}", CLIENT_RPC_RX_ERR, e);
                 ClientError::Internal
@@ -52,7 +54,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
     /// to the replication streams to be replicated to the cluster followers, after half of the
     /// cluster members have successfully replicated the entries this routine will proceed with
     /// applying the entries to the state machine. Then the next RPC is processed.
-    pub(super) fn process_client_rpc(&mut self, _: &mut Context<Self>, msg: ClientPayloadWithChan<D, R, E>) -> Box<dyn ActorFuture<Actor=Self, Output=()>> {
+    pub(super) fn process_client_rpc(&mut self, _: &mut Context<Self>, msg: ClientPayloadWithChan<D, R, E>) -> Pin<Box<dyn ActorFuture<Actor=Self, Output=()>>> {
         match &self.state {
             // If node is still leader, continue.
             RaftState::Leader(_) => (),
@@ -60,7 +62,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
             _ => {
                 let _ = msg.tx.send(Err(ClientError::ForwardToLeader{payload: msg.rpc, leader: self.current_leader}))
                     .map_err(|_| error!("{} Error while forwarding to leader at the start of process_client_rpc.", CLIENT_RPC_TX_ERR));
-                return Box::new(ready(()).into_actor(self));
+                return Box::pin(ready(()).into_actor(self));
             }
         };
 
@@ -69,7 +71,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
 
         // Send the payload over to the storage engine.
         self.is_appending_logs = true; // NOTE: this routine is pipelined, but we still use a semaphore in case of transition to follower.
-        Box::new(fut::wrap_future(self.storage.send::<AppendEntryToLog<D, E>>(AppendEntryToLog::new(payload.entry())))
+        Box::pin(fut::wrap_future(self.storage.send::<AppendEntryToLog<D, E>>(AppendEntryToLog::new(payload.entry())))
             .map_err(|err, act: &mut Self, ctx| {
                 act.map_fatal_actix_messaging_error(ctx, err, DependencyAddr::RaftStorage);
                 ClientError::Internal

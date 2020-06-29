@@ -13,7 +13,7 @@ repository = "https://github.com/railgun-rs/actix-raft"
 readme = "README.md"
 
 [dependencies]
-actix = "0.9.0"
+actix = "0.10.0-alpha.3"
 bytes = "0.5.4"
 futures = "0.3.4"
 log = "0.4"

@@ -87,7 +87,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
         // Extract leader state, else do nothing.
         match &mut self.state {
             RaftState::Leader(_) => (),
-            _ => return Box::new(fut::err(())),
+            _ => return Box::pin(fut::err(())),
         };
 
         // Ensure snapshotting is configured, else do nothing.
@@ -95,12 +95,12 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
             SnapshotPolicy::LogsSinceLast(threshold) => *threshold,
             SnapshotPolicy::Disabled => {
                 warn!("Received an RSNeedsSnapshot request from a replication stream, but snapshotting is disabled. Cluster is misconfigured.");
-                return Box::new(fut::err(()));
+                return Box::pin(fut::err(()));
             }
         };
 
         // Check for existence of current snapshot.
-        Box::new(fut::wrap_future(self.storage.send(GetCurrentSnapshot::new()))
+        Box::pin(fut::wrap_future(self.storage.send(GetCurrentSnapshot::new()))
             .map_err(|err, act: &mut Self, ctx| act.map_fatal_actix_messaging_error(ctx, err, DependencyAddr::RaftStorage))
             .and_then(|res, act, ctx| act.map_fatal_storage_result(ctx, res))
             .and_then(move |res, act, _| {

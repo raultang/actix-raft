@@ -42,7 +42,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
         let is_pristine = self.last_log_index == 0 && self.state.is_non_voter();
         if !is_pristine {
             warn!("Raft received an InitWithConfig command, but the node is in state {} with index {}.", self.state, self.last_log_index);
-            return Box::new(fut::err(InitWithConfigError::NotAllowed));
+            return Box::pin(fut::err(InitWithConfigError::NotAllowed));
         }
 
         // Ensure given config is normalized and ready for use in the cluster.
@@ -66,7 +66,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
             self.become_candidate(ctx);
         }
 
-        Box::new(fut::ok(()))
+        Box::pin(fut::ok(()))
     }
 }
 
@@ -82,13 +82,13 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
         // Ensure the node is currently the cluster leader.
         let leader_state = match &mut self.state {
             RaftState::Leader(state) => state,
-            _ => return Box::new(fut::err(ProposeConfigChangeError::NodeNotLeader(self.current_leader.clone()))),
+            _ => return Box::pin(fut::err(ProposeConfigChangeError::NodeNotLeader(self.current_leader.clone()))),
         };
 
         // Normalize the proposed config to ensure everything is valid.
         let msg = match normalize_proposed_config(msg, &self.membership) {
             Ok(msg) => msg,
-            Err(err) => return Box::new(fut::err(err)),
+            Err(err) => return Box::pin(fut::err(err)),
         };
 
         // Update consensus state, for use in finalizing joint consensus.
@@ -140,7 +140,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
 
         // Propose the config change to cluster.
         let f = ctx.address().send(ClientPayload::new_config(self.membership.clone()));
-        Box::new(
+        Box::pin(
             async move {
                 f.await
                     .map_err(|_| ProposeConfigChangeError::Internal)?
