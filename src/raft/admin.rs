@@ -10,11 +10,12 @@ use crate::{
     raft::{RaftState, Raft, ReplicationState, state::ConsensusState},
     replication::{ReplicationStream},
     storage::{GetLogEntries, RaftStorage},
+    try_fut::TryActorFutureExt,
 };
 
 
 impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStorage<D, R, E>> Handler<InitWithConfig> for Raft<D, R, E, N, S> {
-    type Result = ResponseActFuture<Self, (), InitWithConfigError>;
+    type Result = ResponseActFuture<Self, Result<(), InitWithConfigError>>;
 
     /// An admin message handler invoked exclusively for cluster formation.
     ///
@@ -41,7 +42,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
         let is_pristine = self.last_log_index == 0 && self.state.is_non_voter();
         if !is_pristine {
             warn!("Raft received an InitWithConfig command, but the node is in state {} with index {}.", self.state, self.last_log_index);
-            return Box::new(fut::err(InitWithConfigError::NotAllowed));
+            return Box::pin(fut::err(InitWithConfigError::NotAllowed));
         }
 
         // Ensure given config is normalized and ready for use in the cluster.
@@ -65,7 +66,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
             self.become_candidate(ctx);
         }
 
-        Box::new(fut::ok(()))
+        Box::pin(fut::ok(()))
     }
 }
 
@@ -74,20 +75,20 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
 // ProposeConfigChange ///////////////////////////////////////////////////////////////////////////
 
 impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStorage<D, R, E>> Handler<ProposeConfigChange<D, R, E>> for Raft<D, R, E, N, S> {
-    type Result = ResponseActFuture<Self, (), ProposeConfigChangeError<D, R, E>>;
+    type Result = ResponseActFuture<Self, Result<(), ProposeConfigChangeError<D, R, E>>>;
 
     /// An admin message handler invoked to trigger dynamic cluster configuration changes. See §6.
     fn handle(&mut self, msg: ProposeConfigChange<D, R, E>, ctx: &mut Self::Context) -> Self::Result {
         // Ensure the node is currently the cluster leader.
         let leader_state = match &mut self.state {
             RaftState::Leader(state) => state,
-            _ => return Box::new(fut::err(ProposeConfigChangeError::NodeNotLeader(self.current_leader.clone()))),
+            _ => return Box::pin(fut::err(ProposeConfigChangeError::NodeNotLeader(self.current_leader.clone()))),
         };
 
         // Normalize the proposed config to ensure everything is valid.
         let msg = match normalize_proposed_config(msg, &self.membership) {
             Ok(msg) => msg,
-            Err(err) => return Box::new(fut::err(err)),
+            Err(err) => return Box::pin(fut::err(err)),
         };
 
         // Update consensus state, for use in finalizing joint consensus.
@@ -138,9 +139,14 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
         self.report_metrics(ctx);
 
         // Propose the config change to cluster.
-        Box::new(fut::wrap_future(ctx.address().send(ClientPayload::new_config(self.membership.clone())))
-            .map_err(|_, _: &mut Self, _| ProposeConfigChangeError::Internal)
-            .and_then(|res, _, _| fut::result(res.map_err(|err| ProposeConfigChangeError::ClientError(err))))
+        let f = ctx.address().send(ClientPayload::new_config(self.membership.clone()));
+        Box::pin(
+            async move {
+                f.await
+                    .map_err(|_| ProposeConfigChangeError::Internal)?
+                    .map_err(ProposeConfigChangeError::ClientError)
+            }
+            .into_actor(self)
             .and_then(|res, act, ctx| act.handle_newly_committed_cluster_config(ctx, res))
         )
     }
@@ -148,7 +154,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
 
 impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStorage<D, R, E>> Raft<D, R, E, N, S> {
     /// Handle response from a newly committed cluster config.
-    pub(super) fn handle_newly_committed_cluster_config(&mut self, ctx: &mut Context<Self>, _: ClientPayloadResponse<R>) -> impl ActorFuture<Actor=Self, Item=(), Error=ProposeConfigChangeError<D, R, E>> {
+    pub(super) fn handle_newly_committed_cluster_config(&mut self, ctx: &mut Context<Self>, _: ClientPayloadResponse<R>) -> impl ActorFuture<Actor=Self, Output=Result<(), ProposeConfigChangeError<D, R, E>>> {
         let leader_state = match &mut self.state {
             RaftState::Leader(state) => state,
             _ => return fut::ok(()),
@@ -207,10 +213,11 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
             .and_then(|res, _, _| fut::result(res
                 .map_err(|err| error!("Error from submitting client payload to finalize joint consensus. {:?}", err))))
             .and_then(|res, act: &mut Self, ctx| act.handle_joint_consensus_finalization(ctx, res))
+            .map(|_, _, _| ())
         );
     }
 
-    pub(super) fn handle_joint_consensus_finalization(&mut self, ctx: &mut Context<Self>, res: ClientPayloadResponse<R>) -> impl ActorFuture<Actor=Self, Item=(), Error=()> {
+    pub(super) fn handle_joint_consensus_finalization(&mut self, ctx: &mut Context<Self>, res: ClientPayloadResponse<R>) -> impl ActorFuture<Actor=Self, Output=Result<(), ()>> {
         // It is only safe to call this routine as leader & when in a uniform consensus state.
         let leader_state = match &mut self.state {
             RaftState::Leader(state) => match &state.consensus_state {

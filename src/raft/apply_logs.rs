@@ -1,7 +1,9 @@
 use std::sync::Arc;
+use std::pin::Pin;
 
 use actix::prelude::*;
-use futures::sync::oneshot;
+use futures::channel::oneshot;
+use futures::future::ready;
 use log::{error};
 
 use crate::{
@@ -11,6 +13,7 @@ use crate::{
     network::RaftNetwork,
     raft::Raft,
     storage::{ApplyEntryToStateMachine, ReplicateToStateMachine, GetLogEntries, RaftStorage},
+    try_fut::TryActorFutureExt,
 };
 
 impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStorage<D, R, E>> Raft<D, R, E, N, S> {
@@ -18,24 +21,24 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
     ///
     /// **NOTE WELL:** these operations are strictly pipelined to ensure that these operations
     /// happen in strict order for guaranteed linearizability.
-    pub(super) fn process_apply_logs_task(&mut self, ctx: &mut Context<Self>, msg: ApplyLogsTask<D, R, E>) -> impl ActorFuture<Actor=Self, Item=(), Error=()> {
+    pub(super) fn process_apply_logs_task(&mut self, ctx: &mut Context<Self>, msg: ApplyLogsTask<D, R, E>) -> Pin<Box<dyn ActorFuture<Actor=Self, Output=()>>> {
         match msg {
-            ApplyLogsTask::Entry{entry, chan} => fut::Either::A(self.process_apply_logs_task_with_entries(ctx, entry, chan)),
-            ApplyLogsTask::Outstanding => fut::Either::B(self.process_apply_logs_task_outstanding(ctx)),
+            ApplyLogsTask::Entry{entry, chan} => self.process_apply_logs_task_with_entries(ctx, entry, chan),
+            ApplyLogsTask::Outstanding => self.process_apply_logs_task_outstanding(ctx),
         }
     }
 
     /// Apply the given payload of log entries to the state machine.
     fn process_apply_logs_task_with_entries(
         &mut self, _: &mut Context<Self>, entry: Arc<Entry<D>>, chan: Option<oneshot::Sender<Result<ClientPayloadResponse<R>, ClientError<D, R, E>>>>,
-    ) -> impl ActorFuture<Actor=Self, Item=(), Error=()> {
+    ) -> Pin<Box<dyn ActorFuture<Actor=Self, Output=()>>> {
         // PREVIOUS TERM UNCOMMITTED LOGS CHECK:
         // Here we are checking to see if there are any logs from the previous term which were
         // outstanding, but which are now safe to apply due to being covered by a new definitive
         // commit index from this term.
         let entry_index = entry.index;
         let f = if (self.last_applied + 1) != entry_index {
-            fut::Either::A(fut::wrap_future(self.storage.send::<GetLogEntries<D, E>>(GetLogEntries::new(self.last_applied + 1, entry_index)))
+            fut::Either::Left(fut::wrap_future(self.storage.send::<GetLogEntries<D, E>>(GetLogEntries::new(self.last_applied + 1, entry_index)))
                 .map_err(|err, act: &mut Self, ctx| {
                     act.map_fatal_actix_messaging_error(ctx, err, DependencyAddr::RaftStorage);
                     ClientError::Internal
@@ -59,13 +62,13 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
                 }))
         } else {
             let res: Result<(), ClientError<D, R, E>> = Ok(());
-            fut::Either::B(fut::result(res))
+            fut::Either::Right(fut::result(res))
         };
 
         // Resume with the normal flow of logic. Here we are simply taking the payload of entries
         // to be applied to the state machine, applying and then responding as needed.
         let line_index = entry.index;
-        f.and_then(move |_, act, _| {
+        Box::pin(f.and_then(move |_, act, _| {
             fut::wrap_future(act.storage.send::<ApplyEntryToStateMachine<D, R, E>>(ApplyEntryToStateMachine::new(entry)))
                 .map_err(|err, act: &mut Self, ctx| {
                     act.map_fatal_actix_messaging_error(ctx, err, DependencyAddr::RaftStorage);
@@ -75,7 +78,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
                     .map_err(|_, _, _| ClientError::Internal))
         })
 
-            .then(move |res, act, _| match res {
+            .map(move |res, act, _| match res {
                 Ok(data) => {
                     // Update state after a success operation on the state machine.
                     act.last_applied = line_index;
@@ -83,29 +86,27 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
                     if let Some(tx) = chan {
                         let _ = tx.send(Ok(ClientPayloadResponse::Applied{index: line_index, data})).map_err(|err| error!("{} {:?}", CLIENT_RPC_TX_ERR, err));
                     }
-                    fut::ok(())
                 }
                 Err(err) => {
                     if let Some(tx) = chan {
                         let _ = tx.send(Err(err)).map_err(|err| error!("{} {:?}", CLIENT_RPC_TX_ERR, err));
                     }
-                    fut::err(())
                 }
-            })
+            }))
     }
 
     /// Check for any outstanding logs which have been committed but which have not been applied,
     /// then apply them.
-    fn process_apply_logs_task_outstanding(&mut self, _: &mut Context<Self>) -> impl ActorFuture<Actor=Self, Item=(), Error=()> {
+    fn process_apply_logs_task_outstanding(&mut self, _: &mut Context<Self>) -> Pin<Box<dyn ActorFuture<Actor=Self, Output=()>>> {
         // Guard against no-op.
         if &self.last_applied == &self.commit_index {
-            return fut::Either::A(fut::ok(()));
+            return Box::pin(ready(()).into_actor(self));
         }
 
         // Fetch the series of entries which must be applied to the state machine.
         let start = self.last_applied + 1;
         let stop = self.commit_index + 1;
-        fut::Either::B(fut::wrap_future(self.storage.send::<GetLogEntries<D, E>>(GetLogEntries::new(start, stop)))
+        Box::pin(fut::wrap_future(self.storage.send::<GetLogEntries<D, E>>(GetLogEntries::new(start, stop)))
             .map_err(|err, act: &mut Self, ctx| act.map_fatal_actix_messaging_error(ctx, err, DependencyAddr::RaftStorage))
             .and_then(|res, act, ctx| act.map_fatal_storage_result(ctx, res))
 
@@ -115,7 +116,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
                 fut::wrap_future(act.storage.send::<ReplicateToStateMachine<D, E>>(ReplicateToStateMachine::new(entries)))
                     .map_err(|err, act: &mut Self, ctx| act.map_fatal_actix_messaging_error(ctx, err, DependencyAddr::RaftStorage))
                     .and_then(|res, act, ctx| act.map_fatal_storage_result(ctx, res))
-                    .map(move |_, _, _| line_index)
+                    .map_ok(move |_, _, _| line_index)
             })
 
             // Update self to reflect progress on applying logs to the state machine.
@@ -124,6 +125,6 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
                     act.last_applied = index;
                 }
                 fut::ok(())
-            }))
+            }).map(|_, _, _| ()))
     }
 }

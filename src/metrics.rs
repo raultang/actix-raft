@@ -13,7 +13,7 @@
 //! use this data to trigger events within higher levels of the parent application.
 //!
 //! Metrics will be exported at a regular interval according to the
-//! [Config.metrics_rate](https://docs.rs/actix-raft/latest/actix-raft/config/struct.Config.html#structfield.metrics_rate)
+//! [Config.metrics_rate](https://docs.rs/actix-raft/latest/actix_raft/config/struct.Config.html#structfield.metrics_rate)
 //! value, but will also emit a new metrics record any time the `state` of the Raft node changes,
 //! the `membership_config` changes, or the `current_leader` changes.
 
@@ -25,7 +25,7 @@ use crate::{
 };
 
 /// All possible states of a Raft node.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum State {
     /// The node is completely passive; replicating entries, but not voting or timing out.
     NonVoter,
@@ -39,9 +39,10 @@ pub enum State {
 
 /// Baseline metrics of the current state of the subject Raft node.
 ///
-/// See the [module level documentation](https://docs.rs/actix-raft/latest/actix-raft/metrics/index.html)
+/// See the [module level documentation](https://docs.rs/actix-raft/latest/actix_raft/metrics/index.html)
 /// for more details.
-#[derive(Clone, Debug, Message)]
+#[derive(Clone, Debug, Message, PartialEq, Eq)]
+#[rtype(result = "()")]
 pub struct RaftMetrics {
     /// The ID of the Raft node.
     pub id: NodeId,

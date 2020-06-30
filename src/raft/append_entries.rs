@@ -10,10 +10,11 @@ use crate::{
     messages::{AppendEntriesRequest, AppendEntriesResponse, ConflictOpt, Entry, EntryPayload},
     raft::{RaftState, Raft, SnapshotState},
     storage::{GetLogEntries, RaftStorage, ReplicateToLog},
+    try_fut::TryActorFutureExt,
 };
 
 impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStorage<D, R, E>> Handler<AppendEntriesRequest<D>> for Raft<D, R, E, N, S> {
-    type Result = ResponseActFuture<Self, AppendEntriesResponse, ()>;
+    type Result = ResponseActFuture<Self, Result<AppendEntriesResponse, ()>>;
 
     /// An RPC invoked by the leader to replicate log entries (§5.3); also used as heartbeat (§5.2).
     ///
@@ -63,12 +64,12 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
         // Only handle requests if actor has finished initialization.
         if let &RaftState::Initializing = &self.state {
             trace!("Got AppendEntriesRequest, but node is in initial state");
-            return Box::new(fut::err(()));
+            return Box::pin(fut::err(()));
         }
 
         // If message's term is less than most recent term, then we do not honor the request.
         if &msg.term < &self.current_term {
-            return Box::new(fut::ok(AppendEntriesResponse{term: self.current_term, success: false, conflict_opt: None}));
+            return Box::pin(fut::ok(AppendEntriesResponse{term: self.current_term, success: false, conflict_opt: None}));
         }
 
         // Update election timeout.
@@ -106,7 +107,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
 
         // If this is just a heartbeat, then respond.
         if msg.entries.len() == 0 {
-            return Box::new(fut::ok(AppendEntriesResponse{term: self.current_term, success: true, conflict_opt: None}));
+            return Box::pin(fut::ok(AppendEntriesResponse{term: self.current_term, success: true, conflict_opt: None}));
         }
 
         // If RPC's `prev_log_index` is 0, or the RPC's previous log info matches the local
@@ -114,24 +115,24 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
         let (term, msg_prev_index, msg_prev_term) = (self.current_term, msg.prev_log_index, msg.prev_log_term);
         let has_prev_log_match = &msg.prev_log_index == &u64::min_value() || (&msg_prev_index == &self.last_log_index && &msg_prev_term == &self.last_log_term);
         if has_prev_log_match {
-            return Box::new(self.append_log_entries(ctx, Arc::new(msg.entries))
-                .map(move |_, _, _| {
+            return Box::pin(self.append_log_entries(ctx, Arc::new(msg.entries))
+                .map_ok(move |_, _, _| {
                     AppendEntriesResponse{term, success: true, conflict_opt: None}
                 }));
         }
 
         // Previous log info doesn't immediately line up, so perform log consistency check and
         // proceed based on its result.
-        Box::new(self.log_consistency_check(ctx, msg_prev_index, msg_prev_term)
+        Box::pin(self.log_consistency_check(ctx, msg_prev_index, msg_prev_term)
             .and_then(move |res, act, ctx| match res {
                 Some(conflict_opt) => {
-                    fut::Either::A(fut::ok(
+                    fut::Either::Left(fut::ok(
                         AppendEntriesResponse{term, success: false, conflict_opt: Some(conflict_opt)}
                     ))
                 }
                 None => {
-                    fut::Either::B(act.append_log_entries(ctx, Arc::new(msg.entries))
-                        .map(move |_, _, _| {
+                    fut::Either::Right(act.append_log_entries(ctx, Arc::new(msg.entries))
+                        .map_ok(move |_, _, _| {
                             AppendEntriesResponse{term, success: true, conflict_opt: None}
                         }))
                 }
@@ -157,10 +158,10 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
     /// that entry.
     fn append_log_entries(
         &mut self, ctx: &mut Context<Self>, entries: Arc<Vec<Entry<D>>>,
-    ) -> impl ActorFuture<Actor=Self, Item=(), Error=()> {
+    ) -> impl ActorFuture<Actor=Self, Output=Result<(), ()>> {
         // If we are already eppending entries, then abort this operation.
         if self.is_appending_logs {
-            return fut::Either::A(fut::err(()));
+            return fut::Either::Left(fut::err(()));
         }
 
         // Check the given entries for any config changes and take the most recent.
@@ -171,17 +172,17 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
         let f = match last_conf_change {
             Some(conf) => {
                 // Update membership info & apply hard state.
-                fut::Either::A(self.update_membership(ctx, conf.membership.clone()))
+                fut::Either::Left(self.update_membership(ctx, conf.membership.clone()))
             }
-            None => fut::Either::B(fut::ok(())),
+            None => fut::Either::Right(fut::ok(())),
         };
 
-        fut::Either::B(f.and_then(move |_, act, _| {
+        fut::Either::Right(f.and_then(move |_, act, _| {
             act.is_appending_logs = true;
             fut::wrap_future(act.storage.send::<ReplicateToLog<D, E>>(ReplicateToLog::new(entries.clone())))
                 .map_err(|err, act: &mut Self, ctx| act.map_fatal_actix_messaging_error(ctx, err, DependencyAddr::RaftStorage))
                 .and_then(|res, act, ctx| act.map_fatal_storage_result(ctx, res))
-                .map(move |_, act, _| {
+                .map_ok(move |_, act, _| {
                     if let Some((idx, term)) = entries.last().map(|elem| (elem.index, elem.term)) {
                         act.last_log_index = idx;
                         act.last_log_term = term;
@@ -207,7 +208,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
     /// If everyhing checks out, a `None` value will be returned and log replication may continue.
     fn log_consistency_check(
         &mut self, _: &mut Context<Self>, index: u64, term: u64,
-    ) -> impl ActorFuture<Actor=Self, Item=Option<ConflictOpt>, Error=()> {
+    ) -> impl ActorFuture<Actor=Self, Output=Result<Option<ConflictOpt>, ()>> {
         let storage = self.storage.clone();
         fut::wrap_future(self.storage.send::<GetLogEntries<D, E>>(GetLogEntries::new(index, index+1)))
             .map_err(|err, act: &mut Self, ctx| act.map_fatal_actix_messaging_error(ctx, err, DependencyAddr::RaftStorage))
@@ -217,7 +218,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
                     // The target entry was not found. This can only mean that we don't have the
                     // specified index yet. Use the last known index & term.
                     None => {
-                        fut::Either::A(fut::ok(Some(ConflictOpt{term: act.last_log_term, index: act.last_log_index})))
+                        fut::Either::Left(fut::ok(Some(ConflictOpt{term: act.last_log_term, index: act.last_log_index})))
                     }
                     // The target entry was found. Compare its term with target term to ensure
                     // everything is consistent.
@@ -225,13 +226,13 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
                         let (target_entry_index, target_entry_term) = (target_entry.index, target_entry.term);
                         if &target_entry_index == &index && &target_entry_term == &term {
                             // Everything checks out. We're g2g.
-                            fut::Either::A(fut::ok(None))
+                            fut::Either::Left(fut::ok(None))
                         } else {
                             // Logs are inconsistent. Fetch the last 50 logs, and use the last
                             // entry of that payload which is still in the target term for
                             // conflict optimization.
                             let start = if index >= 50 { index - 50 } else { 0 };
-                            fut::Either::B(fut::wrap_future(storage.send::<GetLogEntries<D, E>>(GetLogEntries::new(start, index)))
+                            fut::Either::Right(fut::wrap_future(storage.send::<GetLogEntries<D, E>>(GetLogEntries::new(start, index)))
                                 .map_err(|err, act: &mut Self, ctx| act.map_fatal_actix_messaging_error(ctx, err, DependencyAddr::RaftStorage))
                                 .and_then(|res, act, ctx| act.map_fatal_storage_result(ctx, res))
                                 .and_then(move |res, act, _| {

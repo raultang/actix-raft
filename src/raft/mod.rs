@@ -16,7 +16,7 @@ use std::{
 };
 
 use actix::prelude::*;
-use futures::sync::{mpsc};
+use futures::channel::{mpsc};
 use log::{error};
 
 use crate::{
@@ -29,6 +29,7 @@ use crate::{
     raft::state::{CandidateState, FollowerState, LeaderState, RaftState, ReplicationState, SnapshotState},
     replication::{ReplicationStream, RSTerminate},
     storage::{GetInitialState, GetLogEntries, HardState, InitialState, RaftStorage, SaveHardState},
+    try_fut::TryActorFutureExt,
 };
 
 const FATAL_ACTIX_MAILBOX_ERR: &str = "Fatal actix MailboxError while communicating with Raft dependency. Raft is shutting down.";
@@ -183,10 +184,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
         self.cleanup_state(ctx);
 
         // Ensure there is no election timeout.
-        self.election_timeout_stamp = None;
-        if let Some(handle) = self.election_timeout.take() {
-            ctx.cancel_future(handle);
-        }
+        self.cancel_election_timeout(ctx);
 
         // Perform the transition.
         self.state = RaftState::NonVoter;
@@ -204,9 +202,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
         self.cleanup_state(ctx);
 
         // Ensure we have an election timeout loop running.
-        if self.election_timeout.is_none() {
-            self.update_election_timeout(ctx);
-        }
+        self.update_election_timeout(ctx); // Cleans-up any old timeout task, and spawns a new one.
 
         // Perform the transition.
         self.state = RaftState::Follower(FollowerState::default());
@@ -291,9 +287,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
     fn become_leader(&mut self, ctx: &mut Context<Self>) {
         // Cleanup previous state & ensure we've cancelled the election timeout system.
         self.cleanup_state(ctx);
-        if let Some(handle) = self.election_timeout {
-            ctx.cancel_future(handle);
-        }
+        self.cancel_election_timeout(ctx);
 
         // Prep new leader state.
         let (client_request_queue, client_request_receiver) = mpsc::unbounded();
@@ -301,8 +295,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
 
         // Spawn stream which consumes client RPCs.
         ctx.spawn(fut::wrap_stream(client_request_receiver)
-            .and_then(|msg, act: &mut Self, ctx| act.process_client_rpc(ctx, msg))
-            .then(|_, _, _| fut::ok(())) // Ensure errors don't cause the stream to close.
+            .then(|msg, act: &mut Self, ctx| act.process_client_rpc(ctx, msg))
             .finish());
 
         // Spawn new replication stream actors.
@@ -340,6 +333,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
             // In the case that there was a stale record and it was a joint consensus
             // finalization, ensure it is handled properly.
             .and_then(|res, act: &mut Self, ctx| act.handle_joint_consensus_finalization(ctx, res))
+            .map(|_, _, _| ())
         );
     }
 
@@ -407,7 +401,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
         // Spawn the stream for applying logs to the state machine. This will always be `Some` here, never after.
         if let Some(rx) = self._apply_logs_pipeline_receiver.take() {
             ctx.spawn(fut::wrap_stream(rx)
-                .and_then(|msg, act: &mut Self, ctx| act.process_apply_logs_task(ctx, msg))
+                .then(|msg, act: &mut Self, ctx| act.process_apply_logs_task(ctx, msg))
                 .finish());
         }
 
@@ -447,7 +441,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
     /// This method assumes that a storage error observed here is non-recoverable. As such, the
     /// Raft node will be instructed to stop. If such behavior is not needed, then don't use this
     /// interface.
-    fn map_fatal_storage_result<T>(&mut self, ctx: &mut Context<Self>, res: Result<T, E>) -> impl ActorFuture<Actor=Self, Item=T, Error=()> {
+    fn map_fatal_storage_result<T>(&mut self, ctx: &mut Context<Self>, res: Result<T, E>) -> impl ActorFuture<Actor=Self, Output=Result<T, ()>> {
         let res = res.map_err(|err| {
             error!("{} {:?}", FATAL_STORAGE_ERR, err);
             ctx.terminate();
@@ -482,13 +476,14 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
         let hs = HardState{current_term: self.current_term, voted_for: self.voted_for, membership: self.membership.clone()};
         let f = fut::wrap_future(self.storage.send::<SaveHardState<E>>(SaveHardState::new(hs)))
             .map_err(|err, act: &mut Self, ctx| act.map_fatal_actix_messaging_error(ctx, err, DependencyAddr::RaftStorage))
-            .and_then(|res, act, ctx| act.map_fatal_storage_result(ctx, res));
+            .and_then(|res, act, ctx| act.map_fatal_storage_result(ctx, res))
+            .map(|_, _, _| ());
 
         ctx.spawn(f);
     }
 
     /// Save the Raft node's current hard state to disk.
-    fn save_hard_state_async(&mut self, _: &mut Context<Self>) -> impl ActorFuture<Actor=Self, Item=(), Error=()> {
+    fn save_hard_state_async(&mut self, _: &mut Context<Self>) -> impl ActorFuture<Actor=Self, Output=Result<(), ()>> {
         let hs = HardState{current_term: self.current_term, voted_for: self.voted_for, membership: self.membership.clone()};
         fut::wrap_future(self.storage.send::<SaveHardState<E>>(SaveHardState::new(hs)))
             .map_err(|err, act: &mut Self, ctx| act.map_fatal_actix_messaging_error(ctx, err, DependencyAddr::RaftStorage))
@@ -540,9 +535,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
         }
 
         // Cancel any current election timeout before spawning a new one.
-        if let Some(handle) = self.election_timeout.take() {
-            ctx.cancel_future(handle);
-        }
+        self.cancel_election_timeout(ctx);
 
         let timeout = Duration::from_millis(self.config.election_timeout_millis);
         self.election_timeout_stamp = Some(Instant::now() + timeout.clone());
@@ -560,11 +553,19 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
         self.election_timeout_stamp = Some(Instant::now() + Duration::from_millis(self.config.election_timeout_millis));
     }
 
+    /// Cancel the current election timeout task if present & clean-up the election timeout stamp.
+    fn cancel_election_timeout(&mut self, ctx: &mut Context<Self>) {
+        self.election_timeout_stamp = None;
+        if let Some(handle) = self.election_timeout.take() {
+            ctx.cancel_future(handle);
+        }
+    }
+
     /// Update the node's current membership config.
     ///
     /// NOTE WELL: if a leader is stepping down, it should not call this method, as it will cause
     /// the node to transition out of leader state before it can commit the config entry.
-    fn update_membership(&mut self, ctx: &mut Context<Self>, cfg: MembershipConfig) -> impl ActorFuture<Actor=Self, Item=(), Error=()> {
+    fn update_membership(&mut self, ctx: &mut Context<Self>, cfg: MembershipConfig) -> impl ActorFuture<Actor=Self, Output=Result<(), ()>> {
         self.membership = cfg;
 
         // If the given config does not contain this node's ID, it means one of the following:
@@ -594,7 +595,8 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
         let f = fut::wrap_future(self.storage.send::<GetInitialState<E>>(GetInitialState::new()))
             .map_err(|err, act: &mut Self, ctx| act.map_fatal_actix_messaging_error(ctx, err, DependencyAddr::RaftStorage))
             .and_then(|res, act, ctx| act.map_fatal_storage_result(ctx, res))
-            .map(|state, act, ctx| act.initialize(ctx, state));
+            .map_ok(|state, act, ctx| act.initialize(ctx, state))
+            .or_default();
         ctx.spawn(f);
     }
 }

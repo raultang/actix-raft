@@ -7,10 +7,11 @@ use crate::{
     network::RaftNetwork,
     raft::{RaftState, Raft},
     storage::RaftStorage,
+    try_fut::TryActorFutureExt,
 };
 
 impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStorage<D, R, E>> Handler<VoteRequest> for Raft<D, R, E, N, S> {
-    type Result = ResponseActFuture<Self, VoteResponse, ()>;
+    type Result = ResponseActFuture<Self, Result<VoteResponse, ()>>;
 
     /// An RPC invoked by candidates to gather votes (§5.2).
     ///
@@ -22,10 +23,10 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
     fn handle(&mut self, msg: VoteRequest, ctx: &mut Self::Context) -> Self::Result {
         // Only handle requests if actor has finished initialization.
         if let &RaftState::Initializing = &self.state {
-            return Box::new(fut::err(()));
+            return Box::pin(fut::err(()));
         }
 
-        Box::new(fut::result(self.handle_vote_request(ctx, msg)))
+        Box::pin(fut::result(self.handle_vote_request(ctx, msg)))
     }
 }
 
@@ -85,18 +86,16 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
     }
 
     /// Request a vote from the the target peer.
-    pub(super) fn request_vote(&mut self, _: &mut Context<Self>, target: NodeId) -> impl ActorFuture<Actor=Self, Item=(), Error=()> {
+    pub(super) fn request_vote(&mut self, _: &mut Context<Self>, target: NodeId) -> impl ActorFuture<Actor=Self, Output=()> {
         let rpc = VoteRequest::new(target, self.current_term, self.id, self.last_log_index, self.last_log_term);
         fut::wrap_future(self.network.send(rpc))
             .map_err(|err, act: &mut Self, ctx| act.map_fatal_actix_messaging_error(ctx, err, DependencyAddr::RaftNetwork))
             .and_then(|res, _, _| fut::result(res))
-            .and_then(move |res, act, ctx| {
+            .map_ok(move |res, act, ctx| {
                 // Ensure the node is still in candidate state.
                 let state = match &mut act.state {
                     RaftState::Candidate(state) => state,
-                    _ => {
-                        return fut::ok(());
-                    }
+                    _ => return
                 };
 
                 // If responding node sees this node as being unknown to the cluster, and this
@@ -104,7 +103,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
                 // node is being removed from the cluster.
                 if res.is_candidate_unknown && act.last_log_index > 0 {
                     act.become_non_voter(ctx);
-                    return fut::ok(());
+                    return;
                 }
 
                 // If peer's term is greater than current term, revert to follower state.
@@ -113,7 +112,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
                     act.update_current_leader(ctx, UpdateCurrentLeader::Unknown);
                     act.become_follower(ctx);
                     act.save_hard_state(ctx);
-                    return fut::ok(());
+                    return;
                 }
 
                 // If peer granted vote, then update campaign state.
@@ -124,8 +123,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
                         act.become_leader(ctx);
                     }
                 }
-
-                fut::ok(())
             })
+            .map(|_, _, _| ())
     }
 }

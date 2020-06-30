@@ -1,12 +1,14 @@
-use std::{io::Read, fs::File, path::PathBuf, time::{Duration, Instant}};
+use std::{io::Read, fs::File, path::PathBuf, time::Duration};
 
 use actix::prelude::*;
 use log::{debug, error};
 use futures::{
-    sink::{Sink},
-    sync::{mpsc},
+    sink::{SinkExt},
+    channel::{mpsc},
+    future::FutureExt,
+    executor::block_on,
 };
-use tokio_timer::Delay;
+use tokio::time::delay_for;
 
 use crate::{
     AppData, AppDataResponse, AppError, NodeId,
@@ -18,6 +20,7 @@ use crate::{
         RSRevertToFollower, RSState, RSUpdateMatchIndex,
     },
     storage::{RaftStorage},
+    try_fut::{TryActorFutureExt, TryActorStreamExt},
 };
 use crate::messages::ChunkState;
 
@@ -42,34 +45,32 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
             // Transition over to lagging state after snapshot has been sent.
             .and_then(|_, act, ctx| act.transition_to_lagging(ctx))
             // Drive state forward regardless of outcome.
-            .then(|res, act, ctx| {
+            .map(|_, act, ctx| {
                 act.is_driving_state = false;
                 act.drive_state(ctx);
-                fut::result(res)
             }));
     }
 
     /// Handle frames from the target node which are in response to an InstallSnapshot RPC request.
-    fn handle_install_snapshot_response(&mut self, _: &mut Context<Self>, res: InstallSnapshotResponse) -> impl ActorFuture<Actor=Self, Item=(), Error=()> {
+    fn handle_install_snapshot_response(&mut self, _: &mut Context<Self>, res: InstallSnapshotResponse) -> impl ActorFuture<Actor=Self, Output=Result<(), ()>> {
         // Check the response term. As long as everything still matches, then we are good to resume.
         if &res.term > &self.term {
-            fut::Either::B(fut::wrap_future(self.raftnode.send(RSRevertToFollower{target: self.target, term: res.term}))
+            fut::Either::Right(fut::wrap_future(self.raftnode.send(RSRevertToFollower{target: self.target, term: res.term}))
                 .map_err(|err, act: &mut Self, ctx| act.map_fatal_actix_messaging_error(ctx, err, DependencyAddr::RaftInternal))
                 // Ensure an error is returned here, as this was not a successful response.
                 .and_then(|_, _, _| fut::err(())))
         } else {
-            fut::Either::A(fut::ok(()))
+            fut::Either::Left(fut::ok(()))
         }
     }
 
     /// Send the specified snapshot over to the target node.
-    fn send_snapshot(&mut self, _: &mut Context<Self>, snap: RSNeedsSnapshotResponse) -> impl ActorFuture<Actor=Self, Item=(), Error=()> {
+    fn send_snapshot(&mut self, _: &mut Context<Self>, snap: RSNeedsSnapshotResponse) -> impl ActorFuture<Actor=Self, Output=Result<(), ()>> {
         // Look up the snapshot on disk.
         let (snap_index, snap_term) = (snap.index, snap.term);
         let snap_stream = SnapshotStream::new(self.target, snap.pointer.paths, self.config.snapshot_max_chunk_size, self.term, self.id, snap_index, snap_term);
 
         fut::wrap_stream(snap_stream)
-            .and_then(|res, _, _| fut::result(res))
             // Send snapshot RPC frame over to target.
             .and_then(move |rpc, act: &mut Self, _| {
                 // Send the RPC. If an error is encountered, cancell the stream.
@@ -82,25 +83,22 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
             })
 
             // Snapshot pass has finished, handle success or error conditions.
-            .finish().then(move |res, act: &mut Self, _| match res {
+            .try_finish()
+            .then(move |res, act, _| match res {
                 // Snapshot installation was successful. Update target to track last index of snapshot.
                 Ok(_) => {
                     act.next_index = snap_index + 1;
                     act.match_index = snap_index;
                     act.match_term = snap_term;
                     act.raftnode.do_send(RSUpdateMatchIndex{target: act.target, match_index: snap_index, snapshot: true});
-
-                    fut::Either::A(fut::ok(()))
+                    fut::Either::Left(fut::ok(()))
                 }
                 // If an error was encountered for any reason, delay sending the next snapshot for a few seconds.
                 Err(_) => {
                     error!("Snapshot stream finished with an error. Delaying before next iteration.");
-                    let delay = Instant::now() + Duration::from_secs(5);
-                    fut::Either::B(fut::wrap_future(
-                        Delay::new(delay).map_err(|_| ()).then(|res| match res {
-                            Ok(_) => Err(()),
-                            Err(_) => Err(()),
-                        })
+                    let delay = Duration::from_secs(5);
+                    fut::Either::Right(fut::wrap_future(
+                        delay_for(delay).map(Ok)
                     ))
                 }
             })
@@ -139,93 +137,95 @@ impl SnapshotStream {
     }
 
     fn run(mut self) {
-        // Open the target snapshot file & get a read on its length.
-        let mut chan = self.chan.wait();
-        let len = self.files.len();
-        debug!("Start snapshot streaming for {} files", len);
-        for (i, file_str) in self.files.iter().enumerate() {
-//            trace!("Opening snapshot file for streaming {}", file_str);
-            let file_and_len = File::open(PathBuf::from(file_str))
-                .and_then(|f| {
-                    f.metadata()
-                        .map(|meta| (f, meta.len()))
-                });
-            let (mut file, filelen) = match file_and_len {
-                Ok(data) => data,
-                Err(err) => {
-                    error!("Error opening snapshot file for streaming. {}", err);
-                    let _ = chan.send(Err(()));
-                    return;
-                }
-            };
-
-            let mut start = true;
-            loop {
-                let remaining = filelen - self.offset;
-                let chunksize = if self.bufsize > remaining { remaining } else { self.bufsize };
-                let mut data = vec![0u8; chunksize as usize];
-                if let Err(err) = file.read_exact(&mut data) {
-                    error!("Error reading from snapshot file for streaming. {}", err);
-                    let _ = chan.send(Err(()));
-                    let _ = chan.close();
-                    return;
-                }
-
-                let mut snapstate;
-
-                if i == 0 && start {
-                    snapstate = ChunkState::Start(file_str.into());
-                } else if start {
-                    snapstate = ChunkState::NewFile(file_str.into());
-                } else {
-                    snapstate = ChunkState::Process;
-                }
-
-                // Build a new frame for the bytes read.
-                let mut frame = InstallSnapshotRequest {
-                    target: self.target,
-                    term: self.term,
-                    leader_id: self.leader_id,
-                    last_included_index: self.last_included_index,
-                    last_included_term: self.last_included_term,
-                    offset: self.offset,
-                    data,
-                    state: snapstate,
-                };
-                self.offset += chunksize;
-
-                // If this was the last chunk, mark it as so.
-                // Note: Did not handle the Start chunk is the end Chunk
-                let mut is_done = false;
-                if self.offset == filelen {
-                    if i == len -1 {
-                        match frame.state.clone() {
-                            ChunkState::NewFile(s) => frame.state = ChunkState::EndFile(s),
-                            ChunkState::Start(_s) => error!("Got unsupportted state."),
-                            _ => frame.state = ChunkState::End
-                        }
-                    }
-                    is_done = true;
-                    self.offset = 0;
-                }
-
-                start = false;
-
-                match chan.send(Ok(frame)) {
-                    Ok(_) if is_done => {
-                        break;
-                    }
-                    Ok(_) => continue,
+        block_on(async move {
+            // Open the target snapshot file & get a read on its length.
+            let mut chan = self.chan;
+            let len = self.files.len();
+            debug!("Start snapshot streaming for {} files", len);
+            for (i, file_str) in self.files.iter().enumerate() {
+    //            trace!("Opening snapshot file for streaming {}", file_str);
+                let file_and_len = File::open(PathBuf::from(file_str))
+                    .and_then(|f| {
+                        f.metadata()
+                            .map(|meta| (f, meta.len()))
+                    });
+                let (mut file, filelen) = match file_and_len {
+                    Ok(data) => data,
                     Err(err) => {
-                        error!("Error encountered while reading snapshot chunks. {}", err);
+                        error!("Error opening snapshot file for streaming. {}", err);
+                        let _ = chan.send(Err(())).await;
+                        return;
+                    }
+                };
+
+                let mut start = true;
+                loop {
+                    let remaining = filelen - self.offset;
+                    let chunksize = if self.bufsize > remaining { remaining } else { self.bufsize };
+                    let mut data = vec![0u8; chunksize as usize];
+                    if let Err(err) = file.read_exact(&mut data) {
+                        error!("Error reading from snapshot file for streaming. {}", err);
+                        let _ = chan.send(Err(()));
                         let _ = chan.close();
                         return;
                     }
+
+                    let mut snapstate;
+
+                    if i == 0 && start {
+                        snapstate = ChunkState::Start(file_str.into());
+                    } else if start {
+                        snapstate = ChunkState::NewFile(file_str.into());
+                    } else {
+                        snapstate = ChunkState::Process;
+                    }
+
+                    // Build a new frame for the bytes read.
+                    let mut frame = InstallSnapshotRequest {
+                        target: self.target,
+                        term: self.term,
+                        leader_id: self.leader_id,
+                        last_included_index: self.last_included_index,
+                        last_included_term: self.last_included_term,
+                        offset: self.offset,
+                        data,
+                        state: snapstate,
+                    };
+                    self.offset += chunksize;
+
+                    // If this was the last chunk, mark it as so.
+                    // Note: Did not handle the Start chunk is the end Chunk
+                    let mut is_done = false;
+                    if self.offset == filelen {
+                        if i == len -1 {
+                            match frame.state.clone() {
+                                ChunkState::NewFile(s) => frame.state = ChunkState::EndFile(s),
+                                ChunkState::Start(_s) => error!("Got unsupportted state."),
+                                _ => frame.state = ChunkState::End
+                            }
+                        }
+                        is_done = true;
+                        self.offset = 0;
+                    }
+
+                    start = false;
+
+                    match chan.send(Ok(frame)).await {
+                        Ok(_) if is_done => {
+                            break;
+                        }
+                        Ok(_) => continue,
+                        Err(err) => {
+                            error!("Error encountered while reading snapshot chunks. {}", err);
+                            let _ = chan.close();
+                            return;
+                        }
+                    }
                 }
             }
-        }
 
-        let _ = chan.close();
-        debug!("Snapshot streaming finished for {} files", len);
+            let _ = chan.close();
+            debug!("Snapshot streaming finished for {} files", len);
+        })
     }
 }

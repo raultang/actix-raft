@@ -12,6 +12,7 @@ use actix_raft::{
     },
     network::RaftNetwork,
     metrics::{RaftMetrics, State},
+    try_fut::TryActorFutureExt,
 };
 use log::{debug};
 
@@ -73,7 +74,7 @@ impl Actor for RaftRouter {
 impl RaftNetwork<MemoryStorageData> for RaftRouter {}
 
 impl Handler<AppendEntriesRequest<MemoryStorageData>> for RaftRouter {
-    type Result = ResponseActFuture<Self, AppendEntriesResponse, ()>;
+    type Result = ResponseActFuture<Self, Result<AppendEntriesResponse, ()>>;
 
     fn handle(&mut self, msg: AppendEntriesRequest<MemoryStorageData>, _: &mut Self::Context) -> Self::Result {
         self.routed.0 += 1;
@@ -82,40 +83,40 @@ impl Handler<AppendEntriesRequest<MemoryStorageData>> for RaftRouter {
             println!("playload: {:?}", msg.entries.get(0).unwrap().payload);
         }
         if self.isolated_nodes.contains(&msg.target) || self.isolated_nodes.contains(&msg.leader_id) {
-            return Box::new(fut::err(()));
+            return Box::pin(fut::err(()));
         }
-        Box::new(fut::wrap_future(addr.send(msg))
+        Box::pin(fut::wrap_future(addr.send(msg))
             .map_err(|_, _, _| panic!(ERR_ROUTING_FAILURE))
             .and_then(|res, _, _| fut::result(res)))
     }
 }
 
 impl Handler<VoteRequest> for RaftRouter {
-    type Result = ResponseActFuture<Self, VoteResponse, ()>;
+    type Result = ResponseActFuture<Self, Result<VoteResponse, ()>>;
 
     fn handle(&mut self, msg: VoteRequest, _: &mut Self::Context) -> Self::Result {
 
         self.routed.1 += 1;
         let addr = self.routing_table.get(&msg.target).unwrap();
         if self.isolated_nodes.contains(&msg.target) || self.isolated_nodes.contains(&msg.candidate_id) {
-            return Box::new(fut::err(()));
+            return Box::pin(fut::err(()));
         }
-        Box::new(fut::wrap_future(addr.send(msg))
+        Box::pin(fut::wrap_future(addr.send(msg))
             .map_err(|_, _, _| panic!(ERR_ROUTING_FAILURE))
             .and_then(|res, _, _| fut::result(res)))
     }
 }
 
 impl Handler<InstallSnapshotRequest> for RaftRouter {
-    type Result = ResponseActFuture<Self, InstallSnapshotResponse, ()>;
+    type Result = ResponseActFuture<Self, Result<InstallSnapshotResponse, ()>>;
 
     fn handle(&mut self, msg: InstallSnapshotRequest, _: &mut Self::Context) -> Self::Result {
         self.routed.2 += 1;
         let addr = self.routing_table.get(&msg.target).unwrap();
         if self.isolated_nodes.contains(&msg.target) || self.isolated_nodes.contains(&msg.leader_id) {
-            return Box::new(fut::err(()));
+            return Box::pin(fut::err(()));
         }
-        Box::new(fut::wrap_future(addr.send(msg))
+        Box::pin(fut::wrap_future(addr.send(msg))
             .map_err(|_, _, _| panic!(ERR_ROUTING_FAILURE))
             .and_then(|res, _, _| fut::result(res)))
     }
@@ -179,6 +180,7 @@ impl Handler<GetCurrentLeader> for RaftRouter {
 // Register //////////////////////////////////////////////////////////////////
 
 #[derive(Message)]
+#[rtype(result = "()")]
 pub struct Register {
     pub id: NodeId,
     pub addr: Addr<MemRaft>,

@@ -1,6 +1,6 @@
 use actix::prelude::*;
 use log::{debug, error};
-use futures::sync::{mpsc, oneshot};
+use futures::channel::{mpsc, oneshot};
 
 use crate::{
     AppData, AppDataResponse, AppError,
@@ -9,11 +9,12 @@ use crate::{
     messages::{InstallSnapshotRequest, InstallSnapshotResponse},
     raft::{RaftState, Raft, SnapshotState},
     storage::{InstallSnapshot, InstallSnapshotChunk, RaftStorage},
+    try_fut::TryActorFutureExt,
 };
 use crate::messages::ChunkState;
 
 impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStorage<D, R, E>> Handler<InstallSnapshotRequest> for Raft<D, R, E, N, S> {
-    type Result = ResponseActFuture<Self, InstallSnapshotResponse, ()>;
+    type Result = ResponseActFuture<Self, Result<InstallSnapshotResponse, ()>>;
 
     /// Invoked by leader to send chunks of a snapshot to a follower (§7).
     ///
@@ -25,17 +26,17 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
     fn handle(&mut self, msg: InstallSnapshotRequest, ctx: &mut Self::Context) -> Self::Result {
         // Only handle requests if actor has finished initialization.
         if let &RaftState::Initializing = &self.state {
-            return Box::new(fut::err(()));
+            return Box::pin(fut::err(()));
         }
 
         // Don't interact with non-cluster members.
         if !self.membership.contains(&msg.leader_id) {
-            return Box::new(fut::err(()));
+            return Box::pin(fut::err(()));
         }
 
         // If message's term is less than most recent term, then we do not honor the request.
         if &msg.term < &self.current_term {
-            return Box::new(fut::err(()));
+            return Box::pin(fut::err(()));
         }
 
         // Update election timeout.
@@ -60,7 +61,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
         // Extract follower specific state.
         let state = match &mut self.state {
             RaftState::Follower(state) => state,
-            _ => return Box::new(fut::err(())),
+            _ => return Box::pin(fut::err(())),
         };
 
         // Compare current snapshot state with received RPC and handle as needed.
@@ -76,7 +77,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
                 } else {
                     // Duplicate message after one of the channels has been dropped. Err and return to Idle.
                     state.snapshot_state = SnapshotState::Idle;
-                    Box::new(fut::err(()))
+                    Box::pin(fut::err(()))
                 }
             }
             // Pipe a new snapshot chunk through the stream.
@@ -85,14 +86,14 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
                 self.handle_snapshot_chunk(ctx, msg, tx.clone())
             },
             // Duplicate message after one of the channels has been dropped. Err and return to Idle.
-            SnapshotState::Streaming(_, _) => Box::new(fut::err(())),
+            SnapshotState::Streaming(_, _) => Box::pin(fut::err(())),
         }
     }
 }
 
 impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStorage<D, R, E>> Raft<D, R, E, N, S> {
     // Install a new snapshot which was small enough to fit into a single frame.
-    fn handle_mini_snapshot(&mut self, ctx: &mut Context<Self>, msg: InstallSnapshotRequest) -> Box<dyn ActorFuture<Actor=Self, Item=InstallSnapshotResponse, Error=()>> {
+    fn handle_mini_snapshot(&mut self, ctx: &mut Context<Self>, msg: InstallSnapshotRequest) -> ResponseActFuture<Self, Result<InstallSnapshotResponse, ()>> {
         let (tx, rx) = mpsc::unbounded();
         let (chunktx, chunkrx) = oneshot::channel();
         let (finaltx, finalrx) = oneshot::channel();
@@ -117,10 +118,10 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
                 if let RaftState::Follower(state) = &mut self.state {
                     state.snapshot_state = SnapshotState::Idle;
                 }
-                return Box::new(fut::err(()));
+                return Box::pin(fut::err(()));
             }
         };
-        Box::new(fut::wrap_future(chunkrx)
+        Box::pin(fut::wrap_future(chunkrx)
             .and_then(|_, _, _| fut::wrap_future(finalrx))
             .then(move |res, act: &mut Self, _| match res {
                 Ok(_) => match &mut act.state {
@@ -143,7 +144,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
             }))
     }
 
-    fn handle_snapshot_stream(&mut self, ctx: &mut Context<Self>, msg: InstallSnapshotRequest) -> Box<dyn ActorFuture<Actor=Self, Item=InstallSnapshotResponse, Error=()>> {
+    fn handle_snapshot_stream(&mut self, ctx: &mut Context<Self>, msg: InstallSnapshotRequest) -> ResponseActFuture<Self, Result<InstallSnapshotResponse, ()>> {
         let (tx, rx) = mpsc::unbounded();
         let (chunktx, chunkrx) = oneshot::channel();
         let (finaltx, finalrx) = oneshot::channel();
@@ -151,7 +152,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
             RaftState::Follower(state) => {
                 state.snapshot_state = SnapshotState::Streaming(Some(tx.clone()), Some(finalrx));
             }
-            _ => return Box::new(fut::err(())),
+            _ => return Box::pin(fut::err(())),
         }
 
         let (snap_index, snap_term) = (msg.last_included_index, msg.last_included_term);
@@ -173,10 +174,10 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
                 if let RaftState::Follower(state) = &mut self.state {
                     state.snapshot_state = SnapshotState::Idle;
                 }
-                return Box::new(fut::err(()));
+                return Box::pin(fut::err(()));
             }
         };
-        Box::new(fut::wrap_future(chunkrx)
+        Box::pin(fut::wrap_future(chunkrx)
             .then(|res, act: &mut Self, _| match res {
                 Ok(_) => fut::ok(InstallSnapshotResponse{term: act.current_term}),
                 Err(_) => {
@@ -188,7 +189,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
 
     fn handle_final_snapshot_chunk(
         &mut self, _: &mut Context<Self>, msg: InstallSnapshotRequest, tx: mpsc::UnboundedSender<InstallSnapshotChunk>, finalrx: oneshot::Receiver<()>,
-    ) -> Box<dyn ActorFuture<Actor=Self, Item=InstallSnapshotResponse, Error=()>> {
+    ) -> ResponseActFuture<Self, Result<InstallSnapshotResponse, ()>> {
         let (chunktx, chunkrx) = oneshot::channel();
         let (snap_index, snap_term) = (msg.last_included_index, msg.last_included_term);
         match tx.unbounded_send(InstallSnapshotChunk{offset: msg.offset, data: msg.data,  state: msg.state, cb: chunktx}) {
@@ -198,10 +199,10 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
                 if let RaftState::Follower(state) = &mut self.state {
                     state.snapshot_state = SnapshotState::Idle;
                 }
-                return Box::new(fut::err(()));
+                return Box::pin(fut::err(()));
             }
         };
-        Box::new(fut::wrap_future(chunkrx)
+        Box::pin(fut::wrap_future(chunkrx)
             .and_then(|_, _, _| fut::wrap_future(finalrx))
             .then(move |res, act: &mut Self, _| match res {
                 Ok(_) => match &mut act.state {
@@ -226,7 +227,7 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
 
     fn handle_snapshot_chunk(
         &mut self, _: &mut Context<Self>, msg: InstallSnapshotRequest, tx: mpsc::UnboundedSender<InstallSnapshotChunk>,
-    ) -> Box<dyn ActorFuture<Actor=Self, Item=InstallSnapshotResponse, Error=()>> {
+    ) -> ResponseActFuture<Self, Result<InstallSnapshotResponse, ()>> {
         let (chunktx, chunkrx) = oneshot::channel();
         match tx.unbounded_send(InstallSnapshotChunk{offset: msg.offset, data: msg.data,  state: msg.state, cb: chunktx}) {
             Ok(_) => (),
@@ -235,10 +236,10 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
                 if let RaftState::Follower(state) = &mut self.state {
                     state.snapshot_state = SnapshotState::Idle;
                 }
-                return Box::new(fut::err(()));
+                return Box::pin(fut::err(()));
             }
         };
-        Box::new(fut::wrap_future(chunkrx)
+        Box::pin(fut::wrap_future(chunkrx)
             .then(|res, act: &mut Self, _| match res {
                 Ok(_) => fut::ok(InstallSnapshotResponse{term: act.current_term}),
                 Err(_) => {
