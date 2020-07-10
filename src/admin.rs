@@ -1,6 +1,7 @@
 //! Admin message types used to initialize & control a Raft node.
 
 use actix::prelude::*;
+use serde::{Serialize, Deserialize};
 
 use crate::{
     AppData, AppDataResponse, AppError, NodeId,
@@ -56,6 +57,7 @@ impl std::error::Error for InitWithConfigError {}
 ///
 /// - if the node this command is sent to is not the leader of the cluster, it will be rejected.
 /// - if the given changes would leave the cluster in an inoperable state, it will be rejected.
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ProposeConfigChange<D: AppData, R: AppDataResponse, E: AppError> {
     /// New members to be added to the cluster.
     pub(crate) add_members: Vec<NodeId>,
