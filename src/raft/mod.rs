@@ -584,6 +584,30 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
 
         self.save_hard_state_async(ctx)
     }
+
+    fn shutdown(&mut self, ctx: &mut Context<Self>) {
+        match &self.state {
+            RaftState::Initializing => {
+
+            }
+            RaftState::Leader(state) => {
+                state.nodes.iter().for_each(|(e, state)| {
+                    // state.addr
+                })
+            }
+            RaftState::Follower(state) => {
+
+            }
+            RaftState::Candidate(state) => {
+
+            }
+            RaftState::NonVoter => {
+
+            }
+        }
+
+        ctx.terminate();
+    }
 }
 
 impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStorage<D, R, E>> Actor for Raft<D, R, E, N, S> {

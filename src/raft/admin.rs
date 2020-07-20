@@ -12,6 +12,7 @@ use crate::{
     storage::{GetLogEntries, RaftStorage},
     try_fut::TryActorFutureExt,
 };
+use crate::admin::ShutdownNode;
 
 
 impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStorage<D, R, E>> Handler<InitWithConfig> for Raft<D, R, E, N, S> {
@@ -70,6 +71,15 @@ impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStor
     }
 }
 
+impl<D: AppData, R: AppDataResponse, E: AppError, N: RaftNetwork<D>, S: RaftStorage<D, R, E>> Handler<ShutdownNode> for Raft<D, R, E, N, S> {
+    type Result = ResponseActFuture<Self, Result<(), ()>>;
+
+    fn handle(&mut self, mut msg: ShutdownNode, ctx: &mut Self::Context) -> Self::Result {
+        self.shutdown(ctx);
+        Box::pin(fut::ok(()))
+    }
+
+}
 
 //////////////////////////////////////////////////////////////////////////////////////////////////
 // ProposeConfigChange ///////////////////////////////////////////////////////////////////////////

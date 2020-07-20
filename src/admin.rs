@@ -28,6 +28,12 @@ impl Message for InitWithConfig {
     type Result = Result<(), InitWithConfigError>;
 }
 
+pub struct ShutdownNode;
+
+impl Message for ShutdownNode {
+    type Result = Result<(), ()>;
+}
+
 /// The set of errors which may take place when requesting to propose a config change.
 #[derive(Debug)]
 pub enum InitWithConfigError {
